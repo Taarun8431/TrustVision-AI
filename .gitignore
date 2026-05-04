@@ -69,8 +69,14 @@ dist-ssr/
 reports/*.pdf
 database/*.sqlite3
 database/*.db
+trustvision.db
+Backend/trustvision.db
+output/
+reports/
+tmpos4gl57m/
 
 # Other
+*.log
 coverage/
 .coverage
 htmlcov/
