@@ -1,18 +1,22 @@
-from pathlib import Path
+"""
+Runtime configuration for TrustVision AI.
 
+The system uses the Hugging Face SigLip model exclusively:
+  prithivMLmods/deepfake-detector-model-v1
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-MODEL_PATH = ROOT_DIR / "ml" / "models" / "model.pth"
-OUTPUT_DIR = ROOT_DIR / "output"
-GRADCAM_DIR = OUTPUT_DIR / "gradcam"
+Label space (from model config):
+  id2label = {0: "fake", 1: "real"}
+"""
 
-MODEL_VERSION = "TrustVision DeepfakeResNet v1.2-calibrated"
-CORRECTED_CLASS_MAP = {"REAL": 0, "FAKE": 1}
+# Hugging Face model identifier
+MODEL_NAME = "prithivMLmods/deepfake-detector-model-v1"
 
-# The newly trained checkpoint has the correct dataset labels (REAL=0, FAKE=1).
-# Setting DEPLOYED_CLASS_MAP to None ensures inference uses the checkpoint's native class map.
-DEPLOYED_CLASS_MAP = None
+# Human-readable version string shown in API responses and PDF reports
+MODEL_VERSION = "SigLip Deepfake Detector v1 (HuggingFace)"
+
+# Informational note included in /model-info responses
 LABEL_MAPPING_NOTE = (
-    "Inference now natively uses the trained checkpoint's class map "
-    "as the dataset labels have been properly corrected during retraining."
+    "Inference uses the pre-trained Hugging Face SigLip model "
+    "'prithivMLmods/deepfake-detector-model-v1' with label mapping: "
+    "class 0 = FAKE, class 1 = REAL."
 )

@@ -13,7 +13,6 @@ This repository currently supports:
 - Image upload analysis
 - Webcam frame sampling from the browser
 - Authenticity score, prediction, confidence, and risk level
-- Grad-CAM heatmap output
 - PDF report download
 
 This repository does **not** currently implement:
@@ -86,11 +85,11 @@ python app.py
 ```
 
 ### CLI Image Scan
-You can easily scan an image from the terminal. This will also generate a Grad-CAM heatmap demonstrating what the model focused on:
+You can easily scan an image from the terminal with a simple command:
 ```bash
 python demo.py --image path/to/file.jpg
 ```
-The resulting heatmap will be saved to the `output/gradcam/` directory.
+Heatmap generation is not currently supported with the new SigLip model integration.
 
 ## License
 

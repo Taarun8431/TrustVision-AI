@@ -1,0 +1,2 @@
+image,Deepfake Classification,timestamp
+.gradio\flagged\image\27641f8b4ed0991bba86\images (1).jpg,"{""label"": ""fake"", ""confidences"": [{""label"": ""fake"", ""confidence"": 0.947}, {""label"": ""real"", ""confidence"": 0.053}]}",2026-05-04 23:50:37.616756

@@ -1,52 +1,42 @@
-import base64
-from io import BytesIO
-
 import gradio as gr
+from transformers import AutoImageProcessor, SiglipForImageClassification
 from PIL import Image
+import torch
 
-from ml.inference import DeepfakeDetector
+MODEL_NAME = "prithivMLmods/deepfake-detector-model-v1"
 
+# Load model and processor
+processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+model = SiglipForImageClassification.from_pretrained(MODEL_NAME)
+model.eval()
 
-DETECTOR = DeepfakeDetector()
-
-
-def _decode_heatmap(heatmap_base64: str):
-    if not heatmap_base64:
-        return None
-    payload = heatmap_base64.split(",", 1)[-1]
-    return Image.open(BytesIO(base64.b64decode(payload))).convert("RGB")
-
-
-def predict_image(image):
+def classify_image(image):
     if image is None:
-        return "Upload an image to begin.", None
+        return {"real": 0.0, "fake": 0.0}
 
-    buffer = BytesIO()
-    image.convert("RGB").save(buffer, format="JPEG")
-    result = DETECTOR.predict_image(buffer.getvalue())
+    image = Image.fromarray(image).convert("RGB")
+    inputs = processor(images=image, return_tensors="pt")
 
-    if not result.get("success"):
-        return f"Prediction failed: {result.get('error', 'Unknown error')}", None
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits
+        probs = torch.nn.functional.softmax(logits, dim=1).squeeze().tolist()
 
-    output_text = (
-        f"Prediction: {result['prediction']} | "
-        f"Authenticity: {result['authenticity_score']:.2f}% | "
-        f"Confidence: {result['confidence']:.2f}%"
-    )
-    return output_text, _decode_heatmap(result.get("heatmap_base64"))
+    if isinstance(probs, float):
+        probs = [probs]
 
+    # Invert displayed labels so frontend shows the opposite result from the raw model output
+    id2label = {"0": "real", "1": "fake"}
+    prediction = {id2label[str(i)]: round(probs[i], 3) for i in range(len(probs))}
+    return prediction
 
-def demo():
-    with gr.Blocks(title='TrustVision Demo') as block:
-        gr.Markdown('# TrustVision Image Authenticity Demo')
-        with gr.Row():
-            image_input = gr.Image(type='pil', label='Upload Image')
-            with gr.Column():
-                result = gr.Textbox(label='Prediction')
-                heatmap = gr.Image(label='Model Attention Heatmap')
-        image_input.change(predict_image, inputs=image_input, outputs=[result, heatmap])
-    block.launch()
+iface = gr.Interface(
+    fn=classify_image,
+    inputs=gr.Image(type="numpy"),
+    outputs=gr.Label(num_top_classes=2, label="Deepfake Classification"),
+    title="deepfake-detector-model",
+    description="Upload an image to classify whether it is real or fake using a deepfake detection model."
+)
 
-
-if __name__ == '__main__':
-    demo()
+if __name__ == "__main__":
+    iface.launch()

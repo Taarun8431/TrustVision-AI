@@ -1,18 +1,38 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-sqlalchemy>=2.0.0
-python-multipart>=0.0.9
-reportlab>=4.2.0
+# TrustVision AI — Python dependencies
+#
+# Primary model: prithivMLmods/deepfake-detector-model-v1 (HuggingFace SigLip)
+# Backend:       FastAPI + Uvicorn
+# Database:      SQLite via SQLAlchemy
+# Reports:       ReportLab PDF generation
 
-numpy>=1.26.0,<3
-pillow>=10.0.0
-opencv-python>=4.9.0
-scipy>=1.13.0
+# --- Web framework ---
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
 
-torch>=2.4.0
-torchvision>=0.19.0
-grad-cam>=1.5.0
-mediapipe>=0.10.0
+# --- Database ---
+sqlalchemy==2.0.36
 
-gradio>=4.44.0
-google-genai>=1.0.0
+# --- PDF reports ---
+reportlab==4.2.5
+
+# --- Image processing ---
+numpy==1.26.4
+pillow==10.4.0
+opencv-python==4.10.0.84
+scipy==1.13.1
+
+# --- ML / HuggingFace SigLip model ---
+torch==2.4.1
+transformers==4.46.3
+safetensors==0.4.5
+hf_xet==1.1.0
+
+# --- Optional: MediaPipe face landmarks ---
+mediapipe==0.10.18
+
+# --- Optional: Gradio demo (app.py) ---
+gradio==4.44.1
+
+# --- Optional: Gemini Vision secondary verifier ---
+google-genai==1.12.1

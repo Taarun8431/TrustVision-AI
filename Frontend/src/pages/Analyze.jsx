@@ -33,6 +33,11 @@ function formatScanResult(data, modelName) {
         model: data.model_version || modelName,
         timestamp: data.timestamp,
         reportUrl: data.report_url ? `${API_BASE_URL}${data.report_url}` : null,
+        geminiVerdict: data.gemini_verdict || null,
+        geminiReasoning: data.gemini_reasoning || null,
+        geminiConfidence: data.gemini_confidence !== undefined && data.gemini_confidence !== null
+            ? parseFloat(data.gemini_confidence).toFixed(1)
+            : null,
     };
 }
 
@@ -602,14 +607,48 @@ export default function Analyze() {
                                             </div>
                                         </div>
 
-                                        {/* Advanced Heatmap */}
+                                        {/* Model badge */}
+                                        {activeResult.model && (
+                                            <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-100 rounded-xl">
+                                                <ShieldCheck className="w-4 h-4 text-sky-500 shrink-0" />
+                                                <span className="text-xs text-slate-500 font-medium truncate">
+                                                    Model: <span className="text-slate-700 font-bold">{activeResult.model}</span>
+                                                </span>
+                                            </div>
+                                        )}
+
+                                        {/* Gemini secondary verdict */}
+                                        {activeResult.geminiVerdict && (
+                                            <div className="rounded-2xl border border-violet-200 bg-violet-50/60 p-4">
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <span className="text-xs font-bold text-violet-600 uppercase tracking-wide">
+                                                        Gemini Vision Verification
+                                                    </span>
+                                                    {activeResult.geminiConfidence && (
+                                                        <span className="text-xs font-bold text-violet-500">
+                                                            {activeResult.geminiConfidence}% confidence
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <p className="text-sm font-bold text-violet-900 mb-1">
+                                                    Verdict: {activeResult.geminiVerdict}
+                                                </p>
+                                                {activeResult.geminiReasoning && (
+                                                    <p className="text-xs text-violet-700 leading-relaxed">
+                                                        {activeResult.geminiReasoning}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Attention heatmap (shown when available) */}
                                         {activeResult.heatmap_base64 && (
                                             <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm">
                                                 <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 flex justify-between items-center">
                                                     <span className="text-xs font-bold text-slate-500">MODEL ATTENTION HEATMAP</span>
                                                     <span className="w-2 h-2 rounded-full bg-sky-500" />
                                                 </div>
-                                                <img src={activeResult.heatmap_base64} alt="Heatmap" className="w-full h-auto" />
+                                                <img src={activeResult.heatmap_base64} alt="Model attention heatmap" className="w-full h-auto" />
                                             </div>
                                         )}
 
