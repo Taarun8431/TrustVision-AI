@@ -1,71 +1,50 @@
-import os
-import numpy as np
-from PIL import Image
-import torch
-from torchvision import transforms
-from model import DeepfakeResNetViT
-from demo import compute_landmark_score
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.image import show_cam_on_image
+import base64
+from io import BytesIO
+
 import gradio as gr
+from PIL import Image
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'ml', 'models', 'model.pth')
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'output')
-GRADCAM_DIR = os.path.join(OUTPUT_DIR, 'gradcam')
-os.makedirs(GRADCAM_DIR, exist_ok=True)
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+from ml.inference import DeepfakeDetector
 
 
-def load_model():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = DeepfakeResNetViT(pretrained=False).to(device)
-    checkpoint = torch.load(MODEL_PATH, map_location=device)
-    state_dict = checkpoint.get('state_dict', checkpoint)
-    state_dict = {k.replace('model.', '', 1) if k.startswith('model.') else k: v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
-    return model, device
+DETECTOR = DeepfakeDetector()
 
 
-MODEL, DEVICE = load_model()
+def _decode_heatmap(heatmap_base64: str):
+    if not heatmap_base64:
+        return None
+    payload = heatmap_base64.split(",", 1)[-1]
+    return Image.open(BytesIO(base64.b64decode(payload))).convert("RGB")
 
 
 def predict_image(image):
-    img = image.convert('RGB')
-    input_tensor = transform(img).unsqueeze(0).to(DEVICE)
-    landmark_score = torch.tensor([compute_landmark_score(img)], dtype=torch.float32, device=DEVICE)
+    if image is None:
+        return "Upload an image to begin.", None
 
-    out = MODEL(input_tensor, landmark_score)
-    proba = torch.softmax(out, dim=1).detach().cpu().numpy()[0]
-    pred_idx = int(np.argmax(proba))
-    label_text = 'REAL' if pred_idx == 0 else 'FAKE'
-    confidence = float(proba[pred_idx] * 100.0)
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG")
+    result = DETECTOR.predict_image(buffer.getvalue())
 
-    cam = GradCAM(model=MODEL, target_layers=MODEL.get_target_layer(), use_cuda=(DEVICE.type == 'cuda'))
-    grayscale_cam = cam(input_tensor=input_tensor, eigen_smooth=True)[0]
-    img_np = np.array(img.resize((224, 224))).astype(np.float32) / 255.0
-    cam_image = show_cam_on_image(img_np, grayscale_cam, use_rgb=True)
-    heatmap_path = os.path.join(GRADCAM_DIR, 'latest_heatmap.jpg')
-    Image.fromarray(cam_image).save(heatmap_path)
+    if not result.get("success"):
+        return f"Prediction failed: {result.get('error', 'Unknown error')}", None
 
-    output_text = f"Prediction: {label_text} ({confidence:.1f}% confidence)"
-    return output_text, img, Image.fromarray(cam_image)
+    output_text = (
+        f"Prediction: {result['prediction']} | "
+        f"Authenticity: {result['authenticity_score']:.2f}% | "
+        f"Confidence: {result['confidence']:.2f}%"
+    )
+    return output_text, _decode_heatmap(result.get("heatmap_base64"))
 
 
 def demo():
-    with gr.Blocks(title='Deepfake Detection Demo') as block:
-        gr.Markdown('# Deepfake Detection System')
+    with gr.Blocks(title='TrustVision Demo') as block:
+        gr.Markdown('# TrustVision Image Authenticity Demo')
         with gr.Row():
-            img_in = gr.Image(type='pil', label='Upload Image')
+            image_input = gr.Image(type='pil', label='Upload Image')
             with gr.Column():
                 result = gr.Textbox(label='Prediction')
-                heatmap_img = gr.Image(label='GradCAM Heatmap')
-        img_in.change(predict_image, inputs=img_in, outputs=[result, gr.Image.update(), heatmap_img])
+                heatmap = gr.Image(label='Model Attention Heatmap')
+        image_input.change(predict_image, inputs=image_input, outputs=[result, heatmap])
     block.launch()
 
 

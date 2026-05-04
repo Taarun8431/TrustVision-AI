@@ -8,8 +8,8 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import simpleSplit
 from reportlab.pdfgen import canvas
 
+from ml.runtime_config import MODEL_VERSION
 
-MODEL_VERSION = "TrustVision DeepfakeResNet v1.0"
 ROOT_DIR = Path(__file__).resolve().parent.parent
 REPORTS_DIR = ROOT_DIR / "reports"
 

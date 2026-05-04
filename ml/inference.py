@@ -2,13 +2,15 @@ import torch
 import cv2
 import numpy as np
 import base64
-from torchvision import transforms
-from PIL import Image
-from scipy.fftpack import dct
+import io
 import os
+from torchvision import transforms
+from PIL import Image, ExifTags
+from scipy.fftpack import dct
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 from .model import DeepfakeResNetViT as DeepfakeResNet
+from .runtime_config import DEPLOYED_CLASS_MAP, LABEL_MAPPING_NOTE, MODEL_VERSION
 
 try:
     import mediapipe as mp
@@ -21,30 +23,43 @@ class DeepfakeDetector:
         if model_path is None:
             # Construct the absolute path so we can call inference.py from anywhere (like the Backend root)
             model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "model.pth")
-            
+
+        self.model_path = os.path.abspath(model_path)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         # Load the architecture
         self.model = DeepfakeResNet(pretrained=False).to(self.device)
         self.model.eval()
-        
+
         # Ensure the model directory exists
         os.makedirs(os.path.dirname(model_path) if os.path.dirname(model_path) else 'models', exist_ok=True)
-        
-        # Load weights if available, else use randomly initialized network (useful for verifying pipeline)
+
         self.class_map = {'REAL': 0, 'FAKE': 1}  # fallback default
+        self.class_map_source = "default"
+        self.checkpoint_label_source = None
+        self.model_loaded = False
 
         if os.path.exists(model_path):
             checkpoint = torch.load(model_path, map_location=self.device)
             if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-                self.model.load_state_dict(checkpoint['state_dict'])
-                self.class_map = self._normalize_class_map(checkpoint.get('class_map', self.class_map))
+                state_dict = self._normalize_state_dict(checkpoint['state_dict'])
+                self.model.load_state_dict(state_dict, strict=True)
+                checkpoint_class_map = self._normalize_class_map(checkpoint.get('class_map', self.class_map))
+                if DEPLOYED_CLASS_MAP:
+                    self.class_map = self._normalize_class_map(DEPLOYED_CLASS_MAP)
+                    self.class_map_source = "runtime_config.DEPLOYED_CLASS_MAP"
+                else:
+                    self.class_map = checkpoint_class_map
+                    self.class_map_source = "checkpoint"
+                self.checkpoint_label_source = checkpoint.get("label_source")
+                self.model_loaded = True
                 print(f"Loaded trained model checkpoint from {model_path} with class_map={self.class_map}")
             else:
-                self.model.load_state_dict(checkpoint)
+                self.model.load_state_dict(self._normalize_state_dict(checkpoint), strict=True)
+                self.model_loaded = True
                 print(f"Loaded trained model weights from {model_path} (no class_map metadata). Using default class_map={self.class_map}")
         else:
-            print(f"Warning: Model weights {model_path} not found. Running with random initialization.")
+            print(f"Warning: Model weights {model_path} not found. Inference will return a clear error instead of random predictions.")
 
         # Data transformations required for ResNet
         self.transform = transforms.Compose([
@@ -61,21 +76,53 @@ class DeepfakeDetector:
         self.face_cascade = cv2.CascadeClassifier(cascade_path)
         self.mp_face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True) if MEDIAPIPE_AVAILABLE else None
 
+    def _normalize_state_dict(self, state_dict):
+        if not isinstance(state_dict, dict):
+            return state_dict
+        return {
+            k.replace("model.", "", 1) if k.startswith("model.") else k: v
+            for k, v in state_dict.items()
+        }
+
     def _normalize_class_map(self, class_map):
         if not isinstance(class_map, dict):
             return {'REAL': 0, 'FAKE': 1}
 
-        if 'REAL' in class_map and 'FAKE' in class_map:
-            return {'REAL': int(class_map['REAL']), 'FAKE': int(class_map['FAKE'])}
+        label_to_index = {
+            str(k).strip().upper(): int(v)
+            for k, v in class_map.items()
+            if str(k).strip().upper() in {"REAL", "FAKE"}
+        }
+        if 'REAL' in label_to_index and 'FAKE' in label_to_index:
+            return {'REAL': label_to_index['REAL'], 'FAKE': label_to_index['FAKE']}
 
-        if 0 in class_map and 1 in class_map:
-            normalized = {str(v).upper(): int(k) for k, v in class_map.items()}
-            if 'REAL' in normalized and 'FAKE' in normalized:
-                return {'REAL': normalized['REAL'], 'FAKE': normalized['FAKE']}
+        index_to_label = {}
+        for k, v in class_map.items():
+            try:
+                index_to_label[int(k)] = str(v).strip().upper()
+            except (TypeError, ValueError):
+                continue
+        normalized = {label: index for index, label in index_to_label.items()}
+        if 'REAL' in normalized and 'FAKE' in normalized:
+            return {'REAL': normalized['REAL'], 'FAKE': normalized['FAKE']}
 
         return {'REAL': 0, 'FAKE': 1}
 
+    def metadata(self):
+        return {
+            "model_loaded": self.model_loaded,
+            "model_path": self.model_path,
+            "model_version": MODEL_VERSION,
+            "device": str(self.device),
+            "class_map": self.class_map,
+            "class_map_source": self.class_map_source,
+            "checkpoint_label_source": self.checkpoint_label_source,
+            "label_mapping_note": LABEL_MAPPING_NOTE,
+            "mediapipe_available": MEDIAPIPE_AVAILABLE,
+        }
+
     def _compute_landmark_score(self, pil_image):
+        return 0.5  # Model trained with landmarks disabled
         if self.mp_face_mesh is None:
             return 0.5
 
@@ -138,6 +185,25 @@ class DeepfakeDetector:
         ratio = high_freq_energy / total_energy
         return ratio
 
+    def _compute_ela_variance(self, face_img):
+        """
+        Error Level Analysis: Compress image to JPEG and measure difference variance.
+        AI-generated images often have higher ELA variance due to compression artifacts.
+        """
+        # Encode to JPEG with quality 90
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+        _, encoded_img = cv2.imencode('.jpg', face_img, encode_param)
+        
+        # Decode back
+        decoded_img = cv2.imdecode(encoded_img, cv2.IMREAD_COLOR)
+        
+        # Compute difference
+        diff = cv2.absdiff(face_img.astype(np.float32), decoded_img.astype(np.float32))
+        
+        # Variance of the difference
+        variance = np.var(diff)
+        return float(variance)
+
     def detect_face(self, img_bgr):
         """Detects the largest face in an image and crops it with a margin."""
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -163,12 +229,172 @@ class DeepfakeDetector:
         face_img = img_bgr[y1:y2, x1:x2]
         return face_img, (x1, y1, x2, y2)
 
+    def _read_metadata_signals(self, image_bytes):
+        signals = {
+            "is_ai_metadata": False,
+            "has_camera_exif": False,
+            "ai_metadata_hits": [],
+            "camera_exif_tags": [],
+            "editor_metadata_hits": [],
+            "metadata_error": None,
+        }
+        ai_terms = (
+            "midjourney", "stable diffusion", "stable-diffusion", "dall-e",
+            "dalle", "ai generated", "aigc", "comfyui", "automatic1111",
+            "novelai", "invokeai", "sdxl", "flux", "firefly",
+            "generative ai", "openai", "chatgpt",
+        )
+        editor_terms = ("photoshop", "lightroom", "gimp", "snapseed")
+        camera_tag_names = {
+            "Make", "Model", "LensModel", "LensMake", "ExposureTime",
+            "FNumber", "ISOSpeedRatings", "PhotographicSensitivity",
+            "FocalLength", "DateTimeOriginal",
+        }
+
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as pil_raw:
+                info_text = " ".join(
+                    f"{key}={value}" for key, value in pil_raw.info.items()
+                ).lower()
+                signals["ai_metadata_hits"] = [term for term in ai_terms if term in info_text]
+                signals["editor_metadata_hits"] = [term for term in editor_terms if term in info_text]
+                signals["is_ai_metadata"] = bool(signals["ai_metadata_hits"])
+
+                exif = pil_raw.getexif()
+                if exif:
+                    for key in exif:
+                        tag_name = str(ExifTags.TAGS.get(key, key))
+                        if tag_name in camera_tag_names:
+                            signals["camera_exif_tags"].append(tag_name)
+                    signals["has_camera_exif"] = bool(signals["camera_exif_tags"])
+        except Exception as exc:
+            signals["metadata_error"] = str(exc)
+
+        return signals
+
+    def _compute_forensic_signals(self, face_img):
+        gray_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+        gray_float = gray_face.astype(np.float32)
+        laplacian_var = float(cv2.Laplacian(gray_face, cv2.CV_64F).var())
+        hf_ratio = float(self.detect_frequency_artifacts(gray_float))
+        edges = cv2.Canny(gray_face, 100, 200)
+        edge_fraction = float(np.mean(edges > 0))
+
+        # Error Level Analysis (ELA)
+        ela_variance = self._compute_ela_variance(face_img)
+
+        strong_flags = {
+            "very_low_texture": laplacian_var < 30.0,
+            "very_low_edge_density": edge_fraction < 0.0025,
+            "very_low_high_frequency_energy": hf_ratio < 5e-6,
+            "high_ela_variance": ela_variance > 100.0,  # AI images may have high ELA variance
+        }
+        weak_flags = {
+            "low_texture": laplacian_var < 60.0,
+            "low_edge_density": edge_fraction < 0.006,
+            "low_high_frequency_energy": hf_ratio < 1e-5,
+            "medium_ela_variance": ela_variance > 50.0,
+        }
+
+        return {
+            "laplacian_variance": round(laplacian_var, 6),
+            "dct_high_frequency_ratio": round(hf_ratio, 10),
+            "edge_fraction": round(edge_fraction, 6),
+            "ela_variance": round(ela_variance, 6),
+            "strong_flags": strong_flags,
+            "weak_flags": weak_flags,
+            "strong_signal_count": int(sum(strong_flags.values())),
+            "weak_signal_count": int(sum(weak_flags.values())),
+        }
+
+    def _fuse_probabilities(self, neural_real_prob, neural_fake_prob, metadata_signals, forensic_signals):
+        fake_prob = float(np.clip(neural_fake_prob, 0.001, 0.999))
+        adjustment = 0.0
+        reasons = []
+        strong_count = forensic_signals["strong_signal_count"]
+        weak_flags = forensic_signals["weak_flags"]
+        strong_flags = forensic_signals["strong_flags"]
+
+        if metadata_signals["is_ai_metadata"]:
+            adjustment += 0.75
+            reasons.append("explicit AI-generation metadata")
+
+        if strong_flags["very_low_texture"]:
+            adjustment += 0.10
+            reasons.append("very low facial texture variance")
+        elif weak_flags["low_texture"]:
+            adjustment += 0.02
+
+        if strong_flags["very_low_edge_density"]:
+            adjustment += 0.08
+            reasons.append("very low edge density")
+        elif weak_flags["low_edge_density"]:
+            adjustment += 0.02
+
+        if strong_flags["very_low_high_frequency_energy"]:
+            adjustment += 0.06
+            reasons.append("very low high-frequency energy")
+        elif weak_flags["low_high_frequency_energy"]:
+            adjustment += 0.01
+
+        if strong_flags["high_ela_variance"]:
+            adjustment += 0.08
+            reasons.append("high ELA variance (potential AI artifact)")
+        elif weak_flags["medium_ela_variance"]:
+            adjustment += 0.02
+
+        if not metadata_signals["has_camera_exif"] and strong_count >= 1:
+            adjustment += 0.04
+            reasons.append("no camera EXIF with synthetic artifact signals")
+
+        fused_fake_prob = min(0.99, fake_prob + adjustment)
+
+        if metadata_signals["is_ai_metadata"]:
+            fused_fake_prob = max(fused_fake_prob, 0.97)
+        elif not metadata_signals["has_camera_exif"] and strong_count >= 3:
+            fused_fake_prob = max(fused_fake_prob, 0.72)
+        elif not metadata_signals["has_camera_exif"] and strong_count >= 2:
+            fused_fake_prob = max(fused_fake_prob, 0.62)
+
+        fused_real_prob = 1.0 - fused_fake_prob
+        return {
+            "real_probability": fused_real_prob,
+            "fake_probability": fused_fake_prob,
+            "forensic_adjustment": round(fused_fake_prob - fake_prob, 6),
+            "fusion_reasons": reasons,
+        }
+
+    def _risk_level(self, prediction, confidence, fake_probability, metadata_signals, forensic_signals):
+        if prediction == "FAKE":
+            if metadata_signals["is_ai_metadata"] or fake_probability >= 0.85:
+                return "HIGH"
+            return "MEDIUM"
+
+        if confidence < 65 or forensic_signals["strong_signal_count"] >= 2:
+            return "MEDIUM"
+        return "LOW"
+
+    def _generate_heatmap(self, input_tensor, face_rgb):
+        try:
+            grayscale_cam = self.cam(input_tensor=input_tensor, targets=None)[0, :]
+            resized_face = cv2.resize(face_rgb, (224, 224)) / 255.0
+            cam_image = show_cam_on_image(resized_face, grayscale_cam, use_rgb=True)
+            cam_image_bgr = cv2.cvtColor(cam_image, cv2.COLOR_RGB2BGR)
+            _, buffer = cv2.imencode('.jpg', cam_image_bgr)
+            heatmap_base64 = base64.b64encode(buffer).decode('utf-8')
+            return f"data:image/jpeg;base64,{heatmap_base64}", None
+        except Exception as exc:
+            return None, str(exc)
+
     def predict_image(self, image_bytes: bytes):
         """
         Accepts raw image bytes, runs face detection, deepfake inference,
         and generates Grad-CAM heatmap overlay.
         """
         try:
+            if not self.model_loaded:
+                raise RuntimeError(f"Model weights are not loaded. Expected checkpoint at {self.model_path}.")
+
             # Decode bytes to OpenCV BGR image
             np_img = np.frombuffer(image_bytes, np.uint8)
             img_bgr = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
@@ -200,72 +426,33 @@ class DeepfakeDetector:
             # Resolve class indices from class_map (checkpoint metadata) to prevent reversal
             real_index = int(self.class_map.get('REAL', 0))
             fake_index = int(self.class_map.get('FAKE', 1))
-            real_prob = probs[real_index].item()
-            fake_prob = probs[fake_index].item()
-            
-            # --- V2 Heuristic: AI Smoothness & Frequency Domain Artifacts ---
-            # Modern Diffusion models (like Midjourney) output unnaturally smooth gradients.
-            # They also leave statistical compression footprints in the high-frequency spectrum.
-            gray_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
-            laplacian_var = cv2.Laplacian(gray_face, cv2.CV_64F).var()
-            
-            # 1. Analyze Mathematical DCT spectrum for Generative Checkerboard Artifacts
-            hf_ratio = self.detect_frequency_artifacts(gray_face)
-            
-            # 2. Analyze Canny Edge Density
-            # Real human faces have pores, fine hairs, and subsurface light scattering that creates micro-edges.
-            # AI generators output plastic-like skin that dramatically reduces edge density.
-            edges = cv2.Canny(gray_face, 100, 200)
-            edge_density = np.sum(edges) / (gray_face.shape[0]*gray_face.shape[1])
-            
-            # Heuristic Penalty Voting System
-            # We don't want to accidentally flag real photographes taken with Soft Focus / Bokeh lenses
-            penalty_score = 0
-            if laplacian_var < 150: penalty_score += 1     # Fails Smoothness / Film Grain check
-            if hf_ratio < 0.0001: penalty_score += 1       # Fails Mathematical DCT upscale check
-            if edge_density < 8: penalty_score += 1        # Fails physical micro-edge texture check
-            
-            # If the image fails at least 2 out of 3 physics/reality checks simultaneously:
-            # DISABLED: This heuristic is causing false positives on real images
-            # if penalty_score >= 2:
-            #     # Boost the fake probability by simulating a domain-shift correction
-            #     fake_prob += 4.0  
-                
-            # Normalize probabilities
-            total = real_prob + fake_prob
-            fake_prob = fake_prob / total
-            real_prob = real_prob / total
-            
-            authenticity_score = real_prob * 100
+            neural_real_prob = float(probs[real_index].item())
+            neural_fake_prob = float(probs[fake_index].item())
 
+            metadata_signals = self._read_metadata_signals(image_bytes)
+            forensic_signals = self._compute_forensic_signals(face_img)
+            fusion = self._fuse_probabilities(
+                neural_real_prob,
+                neural_fake_prob,
+                metadata_signals,
+                forensic_signals,
+            )
+            real_prob = fusion["real_probability"]
+            fake_prob = fusion["fake_probability"]
+
+            authenticity_score = real_prob * 100
             pred_index = real_index if real_prob >= fake_prob else fake_index
             prediction = "REAL" if pred_index == real_index else "FAKE"
             confidence = max(real_prob, fake_prob) * 100
-            
-            # Determine Risk Level
-            if prediction == "FAKE" and confidence > 80:
-                risk_level = "HIGH"
-            elif prediction == "FAKE" or (prediction == "REAL" and confidence < 70):
-                risk_level = "MEDIUM"
-            else:
-                risk_level = "LOW"
-                
-            # 2. Grad-CAM Interpretation
-            # GradCAM requires gradients, so we run it outside torch.no_grad()
-            # We visualize the class with the highest probability (targets=None defaults to max class)
-            grayscale_cam = self.cam(input_tensor=input_tensor, targets=None)[0, :]
-            
-            # Resize the original RGB face crop to match the heatmap size (224x224) 
-            # and normalize to [0,1] for overlaying
-            resized_face = cv2.resize(face_rgb, (224, 224)) / 255.0
-            
-            # Overlay heatmap using jet colormap
-            cam_image = show_cam_on_image(resized_face, grayscale_cam, use_rgb=True)
-            
-            # Convert back to BGR to encode as Base64 format
-            cam_image_bgr = cv2.cvtColor(cam_image, cv2.COLOR_RGB2BGR)
-            _, buffer = cv2.imencode('.jpg', cam_image_bgr)
-            heatmap_base64 = base64.b64encode(buffer).decode('utf-8')
+            risk_level = self._risk_level(
+                prediction,
+                confidence,
+                fake_prob,
+                metadata_signals,
+                forensic_signals,
+            )
+
+            heatmap_base64, heatmap_error = self._generate_heatmap(input_tensor, face_rgb)
             
             return {
                 "success": True,
@@ -273,8 +460,22 @@ class DeepfakeDetector:
                 "prediction": prediction,
                 "confidence": round(confidence, 2),
                 "risk_level": risk_level,
-                "heatmap_base64": f"data:image/jpeg;base64,{heatmap_base64}",
-                "face_box": {"x1": face_box[0], "y1": face_box[1], "x2": face_box[2], "y2": face_box[3]}
+                "real_probability": round(real_prob * 100, 3),
+                "fake_probability": round(fake_prob * 100, 3),
+                "neural_real_probability": round(neural_real_prob * 100, 3),
+                "neural_fake_probability": round(neural_fake_prob * 100, 3),
+                "model_version": MODEL_VERSION,
+                "class_map": self.class_map,
+                "class_map_source": self.class_map_source,
+                "heatmap_base64": heatmap_base64,
+                "heatmap_error": heatmap_error,
+                "face_box": {"x1": face_box[0], "y1": face_box[1], "x2": face_box[2], "y2": face_box[3]},
+                "forensic_analysis": {
+                    "metadata": metadata_signals,
+                    "signals": forensic_signals,
+                    "forensic_adjustment": fusion["forensic_adjustment"],
+                    "fusion_reasons": fusion["fusion_reasons"],
+                },
             }
             
         except Exception as e:

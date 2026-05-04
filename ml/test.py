@@ -57,7 +57,10 @@ def main():
         
     print("\nConfiguring model...")
     model = DeepfakeResNet(pretrained=False).to(DEVICE)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    checkpoint = torch.load(model_path, map_location=DEVICE)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    normalized = {k.replace("model.", "", 1) if k.startswith("model.") else k: v for k, v in state_dict.items()}
+    model.load_state_dict(normalized, strict=False)
     model.eval()
 
     # 4. Evaluation Loop
@@ -68,11 +71,18 @@ def main():
     
     with torch.no_grad():
         test_bar = tqdm(test_loader, desc="Testing")
-        for inputs, labels in test_bar:
+        for batch in test_bar:
+            if len(batch) == 3:
+                inputs, labels, lmarks = batch
+            else:
+                inputs, labels = batch
+                lmarks = torch.full((inputs.size(0),), 0.5)
+
             inputs, labels = inputs.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
+            lmarks = lmarks.to(DEVICE, non_blocking=True)
             
             with autocast('cuda'):
-                outputs = model(inputs)
+                outputs = model(inputs, lmarks)
             
             _, predicted = torch.max(outputs.data, 1)
             

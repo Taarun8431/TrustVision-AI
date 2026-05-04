@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 from tqdm import tqdm
 import kagglehub
+import numpy as np
 from torch.amp import autocast, GradScaler
 
 from model import DeepfakeResNetViT as DeepfakeModel
@@ -17,15 +18,52 @@ from dataset import DeepfakeDataset
 # Hyperparameters
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_NUM_EPOCHS = 10
-DEFAULT_LEARNING_RATE = 1e-4
+DEFAULT_LEARNING_RATE = 5e-5
 # Windows has issues with DataLoader workers, set to 0 on Windows
 DEFAULT_NUM_WORKERS = 0 if platform.system() == "Windows" else 2
 DEFAULT_SAMPLE_LIMIT = 20000
 DEFAULT_USE_LANDMARKS = False
 AMP_CHOICES = {"auto", "off", "float16", "bfloat16"}
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+LATEST_KAGGLE_DATASET = "birdy654/cifake-real-and-ai-generated-synthetic-images"
 
 OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output"))
+
+# Rigorous Training Tools
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean', weight=None):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.weight = weight
+
+    def forward(self, inputs, targets):
+        ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none', weight=self.weight)
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+def mixup_data(x, y, lmarks, alpha=0.2, device='cuda'):
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(device)
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    mixed_lmarks = lam * lmarks + (1 - lam) * lmarks[index]
+    y_a, y_b = y, y[index]
+    return mixed_x, mixed_lmarks, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
 
 
 def ensure_output_dirs():
@@ -35,12 +73,17 @@ def ensure_output_dirs():
 
 
 def load_dataset(data_path, sample_limit=DEFAULT_SAMPLE_LIMIT, use_landmarks=DEFAULT_USE_LANDMARKS):
+    # Ultra-rigorous Data Augmentation to force the model to look at every pixel
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(degrees=15),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.RandomErasing(p=0.2, scale=(0.02, 0.1)) # Forces network to not rely on just one facial feature
     ])
 
     dataset = DeepfakeDataset(
@@ -269,9 +312,9 @@ def main():
     use_landmarks = config["use_landmarks"]
 
     if dataset_path is None:
-        print("\nDownloading dataset from Kaggle...")
+        print("\nDownloading latest deepfake dataset from Kaggle...")
         try:
-            dataset_path = kagglehub.dataset_download("xhlulu/140k-real-and-fake-faces")
+            dataset_path = kagglehub.dataset_download(LATEST_KAGGLE_DATASET)
             print(f"Dataset securely downloaded/located at: {dataset_path}")
         except Exception as e:
             print(f"Failed to download dataset. Please install kagglehub: `pip install kagglehub`")
@@ -350,8 +393,10 @@ def main():
     amp_enabled, amp_dtype, resolved_amp_mode = resolve_amp_mode(config["amp_mode"], DEVICE)
     print(f"AMP Mode: {resolved_amp_mode}")
 
-    criterion = nn.CrossEntropyLoss(weight=weights)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # Rigorous Training Settings
+    criterion = FocalLoss(gamma=2.0, weight=weights)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
 
     train_losses, val_losses, train_accs, val_accs = [], [], [], []
     best_val_acc = 0.0
@@ -368,12 +413,15 @@ def main():
         for inputs, labels, lmarks in train_bar:
             inputs, labels, lmarks = move_batch_to_device(inputs, labels, lmarks, DEVICE)
 
+            # Apply Mixup Augmentation
+            inputs, lmarks, targets_a, targets_b, lam = mixup_data(inputs, labels, lmarks, alpha=0.2, device=DEVICE)
+
             optimizer.zero_grad(set_to_none=True)
 
             try:
                 with get_autocast_context(DEVICE, amp_enabled, amp_dtype):
                     outputs = model(inputs, lmarks)
-                    loss = criterion(outputs, labels)
+                    loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
 
                 if torch.isnan(loss):
                     print(f"\nWarning: NaN loss detected at epoch {epoch}, skipping batch.")
@@ -424,6 +472,8 @@ def main():
 
         val_loss = val_running_loss / val_total
         val_acc = 100 * val_correct / val_total
+
+        scheduler.step()
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)

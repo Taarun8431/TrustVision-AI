@@ -1,292 +1,97 @@
-# 🛡️ TrustVision AI
+# TrustVision AI
 
-> AI-Powered Media Authenticity & Deepfake Detection Platform
+TrustVision AI is a face-image authenticity analysis project built with:
 
-TrustVision AI is an enterprise-grade deepfake detection and media authenticity verification platform built using modern full-stack architecture and deep learning. It detects manipulated digital media (images and videos) using CNN-based models with explainable AI capabilities and real-time analysis features.
+- `FastAPI` for the backend API
+- `React + Vite + Tailwind CSS` for the frontend
+- `PyTorch` for image inference
+- `SQLite` for scan history
+- `ReportLab` for PDF report export
 
----
+This repository currently supports:
 
-## 🚀 Vision
+- Image upload analysis
+- Webcam frame sampling from the browser
+- Authenticity score, prediction, confidence, and risk level
+- Grad-CAM heatmap output
+- PDF report download
 
-To restore trust in digital media by building a scalable AI platform capable of detecting synthetic and manipulated content across multiple modalities.
+This repository does **not** currently implement:
 
----
-
-## 🧠 Core Capabilities
-
-- Deepfake Image Detection
-- Video Frame-Level Analysis
-- Real-Time Webcam Detection
-- Explainable AI (Grad-CAM Visualization)
-- Enterprise Dashboard & Analytics
-- API-Based Inference Access
-- PDF Authenticity Report Generation
-
----
-
-## 🏗️ System Architecture
-
-```mermaid
-graph TD
-    classDef frontend fill:#3b82f6,stroke:#1d4ed8,stroke-width:2px,color:#fff;
-    classDef backend fill:#10b981,stroke:#047857,stroke-width:2px,color:#fff;
-    classDef ai fill:#f59e0b,stroke:#b45309,stroke-width:2px,color:#fff;
-    classDef db fill:#6366f1,stroke:#4338ca,stroke-width:2px,color:#fff;
-
-    UI["Frontend<br/>(React + Tailwind CSS)"]:::frontend
-    API["Backend API<br/>(FastAPI + JWT)"]:::backend
-    ML["AI Engine<br/>(PyTorch + OpenCV + Grad-CAM)"]:::ai
-    DB[/"Database<br/>(PostgreSQL)"/]:::db
-
-    UI -- "REST APIs (Upload/Analyze)" --> API
-    API -- "Frame Extraction & Inference" --> ML
-    ML -- "Authenticity Score & Heatmap" --> API
-    API -- "Store Scans & User Data" --> DB
-    DB -- "Retrieve History" --> API
-    API -- "JSON Response & PDF Reports" --> UI
-```
-
----
-
-## 🔐 Authentication & Authorization
-
-- Secure JWT-based authentication
-- Role-based access control:
-  - User
-  - Enterprise
-  - Admin
-- Protected API endpoints
-
----
-
-## 📤 Media Analysis Engine
-
-### Supported Formats
-- Images: JPG, JPEG, PNG
-- Videos: MP4
-
-### Detection Output
-- Authenticity Score (0–100%)
-- Prediction Label (REAL / FAKE)
-- Risk Level (Low / Medium / High)
-- Confidence Percentage
-- Timestamp & Model Version
-
----
-
-## 🎥 Video Detection Pipeline
-
-1. Upload video
-2. Extract frames using OpenCV
-3. Run CNN model on sampled frames
-4. Aggregate frame predictions
-5. Generate overall authenticity score
-6. Display suspicious timestamps
-
----
-
-## 🔍 Explainable AI Module
-
-- Grad-CAM heatmap overlay
-- Suspicious region highlighting
-- Model confidence explanation
-- Visual inference breakdown
-
----
-
-## 📊 Enterprise Dashboard
-
-- Total Scans
-- Deepfake Detection Rate
-- Risk Distribution Visualization
-- Scan History Table
-- Model Performance Metrics
-
----
-
-## 🎥 Real-Time Webcam Detection
-
-- WebRTC-based live capture
-- Periodic frame inference
-- Real-time probability indicator
-- Green/Red authenticity signal
-
----
-
-## 🔑 API Access
-
-Enterprise users can generate API keys and access the inference endpoint:
-
-**POST** `/api/analyze`
-
-Example Response:
-
-```json
-{
-  "authenticity_score": 0.87,
-  "prediction": "REAL",
-  "confidence": 87.3,
-  "risk_level": "LOW"
-}
-```
-
----
-
-## 📄 PDF Report Generation
-
-Generated reports include:
-
-- Media metadata
-- Authenticity score
-- Risk assessment
-- Timestamp
-- Model version
-- AI explanation summary
-
-Reports are available from the scan dashboard after a completed analysis and can also be downloaded from the backend with:
-
-```text
-GET /reports/{scan_id}
-```
-
----
-
-## 🛠️ Tech Stack
-
-### Frontend
-- React
-- Tailwind CSS
-- Framer Motion
-- Axios
-
-### Backend
-- FastAPI
-- JWT Authentication
-- SQLAlchemy
-
-### Machine Learning
-- PyTorch
-- Transfer Learning (ResNet / Xception)
-- OpenCV
-- Grad-CAM
-
-### Database
+- User authentication
 - PostgreSQL
+- Video file upload and end-to-end video analysis in the UI
+- Enterprise dashboards or role-based access control
 
----
-
-## 📂 Project Structure
-
-```
-trustvision-ai/
-│
-├── frontend/              # React + Tailwind application
-├── backend/               # FastAPI server
-├── ml/                    # Model training & inference scripts
-├── database/              # DB models & migrations
-├── reports/               # Generated PDF reports
-├── README.md
-└── LICENSE
-```
-
----
-
-## ⚙️ Installation & Setup
-
-### 1️⃣ Clone Repository
-
-```
-git clone https://github.com/debarshimaity2004/TrustVision-AI.git
-cd TrustVision-AI 
-```
-
----
-
-### 2️⃣ Backend Setup
-
-```
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
-
----
-
-### 3️⃣ Frontend Setup
-
-```
-cd frontend
-npm install
-npm run dev
-```
-
----
-
-## 📈 Performance Targets
-
-- Model Accuracy > 90%
-- F1 Score > 0.88
-- Image Inference Time < 3 seconds
-- Secure token-based authentication
-- Scalable API architecture
-
----
-
-## Dataset Labeling
-
-Training no longer guesses labels from file or folder substrings.
-
-Supported dataset formats:
-
-1. Explicit folder structure
+## Project Layout
 
 ```text
-dataset-root/
-  real/
-    image1.jpg
-  fake/
-    image2.jpg
+TrustVision-AI/
+  Backend/              FastAPI routes and PDF reporting
+  Frontend/             React application
+  database/             SQLAlchemy database setup and models
+  ml/                   Core inference logic and ML model weights
+  app.py                Gradio UI demo
+  demo.py               Command-line interface (CLI) image scan demo
+  start_app.py          Starts backend and frontend together
 ```
 
-Nested splits are also valid as long as the class folders are named exactly `real` and `fake`.
+## How to Run the Project
 
-2. CSV manifest
+### Prerequisites
+- **Python 3.10+**
+- **Node.js & npm**
 
-```csv
-path,label
-images/person_001.jpg,real
-images/person_002.jpg,fake
+### 1. Install Dependencies
+Install the Python backend and machine learning dependencies:
+```bash
+pip install -r requirements.txt
 ```
 
-Use `python ml/train.py --data=path\\to\\dataset-root` for folder-based data, or `python ml/train.py --manifest=path\\to\\labels.csv` for manifest-based data.
+Install the React frontend dependencies:
+```bash
+cd Frontend
+npm install
+cd ..
+```
 
----
+### 2. Start the Application
+You can start both the FastAPI backend and the React frontend simultaneously using the provided startup script. From the repository root, run:
+```bash
+python start_app.py
+```
+This script will automatically launch:
+- **Backend API:** `http://localhost:8000`
+- **Frontend UI:** `http://localhost:5173`
 
-## 🔐 Security & Privacy
+*(Press `Ctrl+C` in the terminal to stop all services.)*
 
-- Encrypted media transmission (HTTPS)
-- Token-based authentication
-- Optional automatic media deletion
-- No permanent storage of uploaded media (configurable)
+Alternatively, you can run them manually in separate terminal windows:
+- **Backend:** `python -m uvicorn Backend.main:app --reload`
+- **Frontend:** `cd Frontend && npm run dev`
 
----
+### Optional Gemini Verification
+The app works with the local PyTorch checkpoint by default. To enable the optional Gemini secondary verifier, set one of these environment variables before starting the backend:
+```bash
+GEMINI_API_KEY=your_key_here
+```
+For key rotation, set `GEMINI_API_KEYS` to a comma-separated list. Do not hardcode API keys in source files.
 
-## 🗺️ Future Roadmap
+## Optional Demos
 
-- Audio deepfake detection
-- Multimodal detection (image + audio)
-- Cloud deployment (AWS / GCP)
-- CI/CD integration
-- Model version management
-- Active learning-based retraining
+### Gradio Web UI
+A lightweight Gradio web interface is available for quickly testing the model outside the main application:
+```bash
+python app.py
+```
 
----
+### CLI Image Scan
+You can easily scan an image from the terminal. This will also generate a Grad-CAM heatmap demonstrating what the model focused on:
+```bash
+python demo.py --image path/to/file.jpg
+```
+The resulting heatmap will be saved to the `output/gradcam/` directory.
 
-## 📄 License
+## License
 
-This project is licensed under the MIT License.
-
----
-
-
-
+MIT

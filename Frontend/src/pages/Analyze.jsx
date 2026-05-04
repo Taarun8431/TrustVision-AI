@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Navbar from '../components/Navbar';
 import {
     Activity,
@@ -6,7 +6,6 @@ import {
     CheckCircle,
     FileDown,
     Upload,
-    AlertCircle,
     X,
     ShieldCheck,
     Video,
@@ -28,6 +27,8 @@ function formatScanResult(data, modelName) {
         prediction: data.prediction,
         risk: data.risk_level,
         confidence: data.confidence !== undefined ? parseFloat(data.confidence).toFixed(2) : 0,
+        realProbability: data.real_probability !== undefined ? parseFloat(data.real_probability).toFixed(2) : null,
+        fakeProbability: data.fake_probability !== undefined ? parseFloat(data.fake_probability).toFixed(2) : null,
         heatmap_base64: data.heatmap_base64,
         model: data.model_version || modelName,
         timestamp: data.timestamp,
@@ -39,17 +40,13 @@ function resultAccent(prediction) {
     return prediction === 'FAKE'
         ? {
             badge: 'bg-rose-100 text-rose-700 border-rose-200',
-            icon: 'text-rose-500',
             text: 'text-rose-600',
-            meter: 'from-rose-500 via-red-400 to-orange-400',
             bg: 'bg-rose-50/50',
             ring: 'ring-rose-200/50'
         }
         : {
             badge: 'bg-emerald-100 text-emerald-700 border-emerald-200',
-            icon: 'text-emerald-500',
             text: 'text-emerald-600',
-            meter: 'from-emerald-400 via-emerald-500 to-teal-400',
             bg: 'bg-emerald-50/50',
             ring: 'ring-emerald-200/50'
         };
@@ -77,22 +74,6 @@ export default function Analyze() {
     const activeResult = mode === 'live' ? liveResult : uploadResult;
     const accent = resultAccent(activeResult?.prediction);
 
-    useEffect(() => {
-        return () => {
-            stopLiveDetection();
-        };
-    }, []);
-
-    useEffect(() => {
-        if (mode !== 'live') {
-            stopLiveDetection();
-        }
-    }, [mode]);
-
-    useEffect(() => {
-        setMode(searchParams.get('mode') === 'live' ? 'live' : 'upload');
-    }, [searchParams]);
-
     const scanMedia = async (blob, filename, modelName) => {
         const formData = new FormData();
         formData.append('file', blob, filename);
@@ -110,21 +91,21 @@ export default function Analyze() {
         return formatScanResult(data, modelName);
     };
 
-    const stopStreamTracks = () => {
+    const stopStreamTracks = useCallback(() => {
         if (streamRef.current) {
             streamRef.current.getTracks().forEach((track) => track.stop());
             streamRef.current = null;
         }
-    };
+    }, []);
 
-    const clearLiveInterval = () => {
+    const clearLiveInterval = useCallback(() => {
         if (liveIntervalRef.current) {
             window.clearInterval(liveIntervalRef.current);
             liveIntervalRef.current = null;
         }
-    };
+    }, []);
 
-    const stopLiveDetection = () => {
+    const stopLiveDetection = useCallback(() => {
         clearLiveInterval();
         stopStreamTracks();
         liveRequestInFlightRef.current = false;
@@ -136,7 +117,23 @@ export default function Analyze() {
         if (videoRef.current) {
             videoRef.current.srcObject = null;
         }
-    };
+    }, [clearLiveInterval, stopStreamTracks]);
+
+    useEffect(() => {
+        return () => {
+            stopLiveDetection();
+        };
+    }, [stopLiveDetection]);
+
+    useEffect(() => {
+        if (mode !== 'live') {
+            stopLiveDetection();
+        }
+    }, [mode, stopLiveDetection]);
+
+    useEffect(() => {
+        setMode(searchParams.get('mode') === 'live' ? 'live' : 'upload');
+    }, [searchParams]);
 
     const handleDrag = (e) => {
         e.preventDefault();
@@ -182,13 +179,13 @@ export default function Analyze() {
 
     const startAnalysis = async () => {
         if (!file) {
-            toast.error('Please attach a media file first');
+            toast.error('Please attach an image first');
             return;
         }
 
         setIsAnalyzing(true);
         setUploadResult(null);
-        toast.loading('Analyzing metadata and pixels...', { id: 'analysis' });
+        toast.loading('Running image analysis...', { id: 'analysis' });
 
         try {
             const result = await scanMedia(file, file.name, 'TrustVision Upload Scan');
@@ -259,9 +256,9 @@ export default function Analyze() {
 
             if (!blob) throw new Error('Capture failed');
 
-            const result = await scanMedia(blob, 'webcam-frame.jpg', 'TrustVision Live Array');
+            const result = await scanMedia(blob, 'webcam-frame.jpg', 'TrustVision Webcam Sample');
             setLiveResult(result);
-            setLiveStatus(result.prediction === 'FAKE' ? 'Manipulated frame detected' : 'Authentic frame verified');
+            setLiveStatus(result.prediction === 'FAKE' ? 'Synthetic cues detected' : 'Image looks authentic');
         } catch (error) {
             console.error('Live scan failed:', error);
             setLiveStatus('Analysis failed');
@@ -299,7 +296,7 @@ export default function Analyze() {
 
             setIsCameraReady(true);
             setIsLiveActive(true);
-            setLiveStatus('Scanning live stream (2.5s intervals)');
+            setLiveStatus('Sampling webcam frames every 2.5 seconds');
             await analyzeCurrentFrame();
 
             liveIntervalRef.current = window.setInterval(() => {
@@ -326,9 +323,9 @@ export default function Analyze() {
                     <div className="w-16 h-16 rounded-3xl bg-white shadow-sm border border-slate-100 flex items-center justify-center mb-6">
                         <ShieldCheck className="w-8 h-8 text-sky-500" />
                     </div>
-                    <h1 className="text-4xl md:text-5xl font-black text-slate-900 mb-4 tracking-tight">Trust Analyzer</h1>
+                    <h1 className="text-4xl md:text-5xl font-black text-slate-900 mb-4 tracking-tight">Image Authenticity Scan</h1>
                     <p className="text-slate-500 font-medium max-w-xl mx-auto">
-                        Securely verify media authenticity using our cryptographically-backed neural verification arrays.
+                        Upload a face image or sample webcam frames and review the model verdict, confidence, and heatmap.
                     </p>
                 </motion.div>
 
@@ -350,7 +347,7 @@ export default function Analyze() {
                                 }`}
                             >
                                 {m === 'upload' ? <ImageIcon className="w-4 h-4" /> : <Video className="w-4 h-4" />}
-                                {m === 'upload' ? 'File Analysis' : 'Live Stream'}
+                                {m === 'upload' ? 'Image Upload' : 'Webcam Frames'}
                             </button>
                         ))}
                     </div>
@@ -367,7 +364,7 @@ export default function Analyze() {
                         {mode === 'upload' ? (
                             <div className="flex flex-col h-full">
                                 <h2 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
-                                    <Upload className="w-5 h-5 text-slate-400" /> Upload Source Media
+                                    <Upload className="w-5 h-5 text-slate-400" /> Upload Face Image
                                 </h2>
 
                                 {!file ? (
@@ -386,8 +383,8 @@ export default function Analyze() {
                                         <div className="w-16 h-16 bg-white shadow-sm rounded-full flex items-center justify-center mb-4">
                                             <Upload className="w-8 h-8 text-sky-500" />
                                         </div>
-                                        <p className="text-slate-800 font-bold mb-1">Drag files here to upload</p>
-                                        <p className="text-slate-400 text-sm font-medium mb-8">PNG, JPG up to 50MB</p>
+                                        <p className="text-slate-800 font-bold mb-1">Drag an image here to upload</p>
+                                        <p className="text-slate-400 text-sm font-medium mb-8">JPG, PNG, WEBP up to 50MB</p>
 
                                         <input type="file" id="file-upload" className="hidden" onChange={handleChange} accept="image/*" />
                                         <label
@@ -435,16 +432,16 @@ export default function Analyze() {
                                     }`}
                                 >
                                     {isAnalyzing ? (
-                                        <><Activity className="w-5 h-5 animate-spin" /> Verifying Signatures...</>
+                                        <><Activity className="w-5 h-5 animate-spin" /> Running model inference...</>
                                     ) : (
-                                        <><Activity className="w-5 h-5" /> Execute Verification</>
+                                        <><Activity className="w-5 h-5" /> Analyze Image</>
                                     )}
                                 </motion.button>
                             </div>
                         ) : (
                             <div className="flex flex-col h-full">
                                 <h2 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
-                                    <Video className="w-5 h-5 text-slate-400" /> Live Stream Analysis
+                                    <Video className="w-5 h-5 text-slate-400" /> Webcam Frame Sampling
                                 </h2>
                                 
                                 <div className="relative rounded-3xl overflow-hidden bg-slate-900 mb-6 aspect-video shadow-inner">
@@ -461,7 +458,7 @@ export default function Analyze() {
                                             <div className="w-16 h-16 bg-white rounded-full shadow-sm flex items-center justify-center mb-4">
                                                 <Camera className="w-8 h-8 text-slate-400" />
                                             </div>
-                                            <p className="text-slate-600 font-bold">Camera Disconnected</p>
+                                            <p className="text-slate-600 font-bold">Camera offline</p>
                                         </div>
                                     )}
                                     
@@ -503,7 +500,7 @@ export default function Analyze() {
                                                 : 'bg-slate-900 text-white shadow-md'
                                         }`}
                                     >
-                                        Initiate Feed
+                                        Start Webcam Scan
                                     </motion.button>
                                     <motion.button
                                         whileHover={isLiveActive || isCameraReady ? { scale: 1.02 } : {}}
@@ -516,7 +513,7 @@ export default function Analyze() {
                                                 : 'bg-white border-slate-200 text-slate-700 shadow-sm hover:bg-slate-50'
                                         }`}
                                     >
-                                        Terminate Signal
+                                        Stop Webcam Scan
                                     </motion.button>
                                 </div>
                             </div>
@@ -534,7 +531,7 @@ export default function Analyze() {
                     >
                         <h2 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
                             <ShieldCheck className="w-5 h-5 text-slate-400" />
-                            Diagnostic Output
+                            Scan Result
                         </h2>
 
                         <div className="flex-1">
@@ -550,8 +547,8 @@ export default function Analyze() {
                                         <div className="w-16 h-16 rounded-full border-2 border-slate-100 bg-slate-50 flex items-center justify-center mb-4">
                                             <Activity className="w-6 h-6 text-slate-300" />
                                         </div>
-                                        <p className="font-semibold text-slate-600">Awaiting Data Feed</p>
-                                        <p className="text-sm">Initiate an upload or live stream to begin.</p>
+                                        <p className="font-semibold text-slate-600">Awaiting input</p>
+                                        <p className="text-sm">Upload an image or start the webcam scan.</p>
                                     </motion.div>
                                 ) : (isAnalyzing || isLiveProcessing) && !activeResult ? (
                                     <motion.div
@@ -566,8 +563,8 @@ export default function Analyze() {
                                             transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
                                             className="w-12 h-12 rounded-full border-[3px] border-slate-100 border-t-sky-500 mb-6"
                                         />
-                                        <p className="font-bold text-slate-900 mb-1">Verifying Data</p>
-                                        <p className="text-sm text-slate-500">Cross-referencing neural patterns...</p>
+                                        <p className="font-bold text-slate-900 mb-1">Analyzing image</p>
+                                        <p className="text-sm text-slate-500">Running the current detector and preparing the heatmap...</p>
                                     </motion.div>
                                 ) : activeResult ? (
                                     <motion.div
@@ -578,14 +575,19 @@ export default function Analyze() {
                                     >
                                         {/* Main Result Hero */}
                                         <div className={`p-6 rounded-3xl ${accent.bg} border ${accent.badge} flex flex-col items-center justify-center text-center`}>
-                                            <p className="text-xs font-bold uppercase tracking-widest mb-1 opacity-70">Authenticity Rating</p>
+                                            <p className="text-xs font-bold uppercase tracking-widest mb-1 opacity-70">Authenticity Estimate</p>
                                             <div className="flex items-end gap-1 mb-2">
                                                 <span className={`text-6xl font-black tracking-tighter ${accent.text}`}>{activeResult.score}</span>
                                                 <span className={`text-xl font-bold pb-2 ${accent.text}`}>%</span>
                                             </div>
                                             <div className={`px-4 py-1.5 rounded-full bg-white/50 border font-bold text-sm inline-flex items-center gap-2 ${accent.badge}`}>
-                                                <CheckCircle className="w-4 h-4" /> {activeResult.prediction} DETECTED
+                                                <CheckCircle className="w-4 h-4" /> Prediction: {activeResult.prediction}
                                             </div>
+                                            {activeResult.realProbability && activeResult.fakeProbability && (
+                                                <p className="mt-3 text-sm font-semibold text-slate-600">
+                                                    REAL {activeResult.realProbability}% · FAKE {activeResult.fakeProbability}%
+                                                </p>
+                                            )}
                                         </div>
 
                                         {/* Stat Grid */}
@@ -595,7 +597,7 @@ export default function Analyze() {
                                                 <p className="text-xl font-black text-slate-900">{activeResult.confidence}%</p>
                                             </div>
                                             <div className="bg-slate-50 border border-slate-100 p-4 rounded-2xl">
-                                                <p className="text-xs text-slate-500 font-bold uppercase mb-1">Risk Index</p>
+                                                <p className="text-xs text-slate-500 font-bold uppercase mb-1">Risk Level</p>
                                                 <p className="text-xl font-black text-slate-900 capitalize">{activeResult.risk}</p>
                                             </div>
                                         </div>
@@ -604,7 +606,7 @@ export default function Analyze() {
                                         {activeResult.heatmap_base64 && (
                                             <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm">
                                                 <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 flex justify-between items-center">
-                                                    <span className="text-xs font-bold text-slate-500">RESNET-VIT HEATMAP</span>
+                                                    <span className="text-xs font-bold text-slate-500">MODEL ATTENTION HEATMAP</span>
                                                     <span className="w-2 h-2 rounded-full bg-sky-500" />
                                                 </div>
                                                 <img src={activeResult.heatmap_base64} alt="Heatmap" className="w-full h-auto" />

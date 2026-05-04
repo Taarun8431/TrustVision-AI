@@ -1,102 +1,49 @@
-import os
 import argparse
-import torch
-import numpy as np
-from PIL import Image
-from torchvision import transforms
-from model import DeepfakeResNetViT
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.image import show_cam_on_image
+import base64
+from pathlib import Path
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'output')
-GRADCAM_DIR = os.path.join(OUTPUT_DIR, 'gradcam')
-os.makedirs(GRADCAM_DIR, exist_ok=True)
-
-MODELPATH = os.path.join(os.path.dirname(__file__), 'ml', 'models', 'model.pth')
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+from ml.inference import DeepfakeDetector
+from ml.runtime_config import GRADCAM_DIR
 
 
-def compute_landmark_score(image):
-    try:
-        import mediapipe as mp
-    except ImportError:
-        return 0.5
+def _write_heatmap(heatmap_base64: str, image_path: Path) -> Path | None:
+    if not heatmap_base64:
+        return None
 
-    mp_face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True)
-    results = mp_face_mesh.process(np.array(image))
-    if not results.multi_face_landmarks:
-        return 0.5
-    lm = results.multi_face_landmarks[0].landmark
-    coords = np.array([[p.x, p.y] for p in lm])
-    eye_left = coords[33]; eye_right = coords[263]; nose = coords[1]; mouth = coords[0]
-    eye_dist = np.linalg.norm(eye_left - eye_right)
-    nose_eye = np.linalg.norm(nose - (eye_left + eye_right) / 2)
-    mouth_nose = np.linalg.norm(mouth - nose)
-    if eye_dist == 0:
-        return 0.5
-    ratio1 = nose_eye / eye_dist
-    ratio2 = mouth_nose / eye_dist
-    ideal1, ideal2 = 0.35, 0.45
-    score = 1.0 - (abs(ratio1 - ideal1) + abs(ratio2 - ideal2)) / 1.0
-    score = np.clip((score + 1) / 2, 0.0, 1.0)
-    return float(score)
+    payload = heatmap_base64.split(",", 1)[-1]
+    output_path = GRADCAM_DIR / f"{image_path.stem}_heatmap.jpg"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(base64.b64decode(payload))
+    return output_path
 
 
-def load_model(device):
-    model = DeepfakeResNetViT(pretrained=False).to(device)
-    checkpoint = torch.load(MODELPATH, map_location=device)
-    state_dict = checkpoint.get('state_dict', checkpoint)
-    state_dict = {k.replace('model.', '', 1) if k.startswith('model.') else k: v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
-    return model
+def infer_image(image_path: str):
+    source = Path(image_path).expanduser().resolve()
+    detector = DeepfakeDetector()
+    result = detector.predict_image(source.read_bytes())
 
+    if not result.get("success"):
+        raise RuntimeError(result.get("error", "Inference failed."))
 
-def infer_image(image_path):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = load_model(device)
-    img = Image.open(image_path).convert('RGB')
-    inp = transform(img).unsqueeze(0).to(device)
-    landmark_score = torch.tensor([compute_landmark_score(img)], dtype=torch.float32).to(device)
+    heatmap_path = _write_heatmap(result.get("heatmap_base64"), source)
 
-    output = model(inp, landmark_score)
-    probs = torch.softmax(output, dim=1).cpu().squeeze().numpy()
-    pred_idx = int(np.argmax(probs))
-    label = 'REAL' if pred_idx == 0 else 'FAKE'
+    print("=" * 50)
+    print(f"Image            : {source.name}")
+    print(f"Prediction       : {result['prediction']}")
+    print(f"Authenticity     : {result['authenticity_score']:.2f}%")
+    print(f"Confidence       : {result['confidence']:.2f}%")
+    print(f"REAL probability : {result['real_probability']:.2f}%")
+    print(f"FAKE probability : {result['fake_probability']:.2f}%")
+    print(f"Model version    : {result['model_version']}")
+    if heatmap_path is not None:
+        print(f"Heatmap          : {heatmap_path}")
+    print("=" * 50)
 
-    cam = GradCAM(model=model, target_layers=model.get_target_layer(), use_cuda=(device.type=='cuda'))
-    grayscale_cam = cam(input_tensor=inp, eigen_smooth=True)[0]
-    img_np = np.array(img.resize((224, 224))).astype(np.float32) / 255.0
-    cam_image = show_cam_on_image(img_np, grayscale_cam, use_rgb=True)
-
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-    os.makedirs(GRADCAM_DIR, exist_ok=True)
-    gradcam_path = os.path.join(GRADCAM_DIR, f"{base_name}_heatmap.jpg")
-    Image.fromarray(cam_image).save(gradcam_path)
-
-    confidence = float(probs[pred_idx] * 100.0)
-
-    print("═══════════════════════════════")
-    print(f"Image   : {os.path.basename(image_path)}")
-    print(f"Result  : {label} ({confidence:.1f}% confident)")
-    print(f"Heatmap : {gradcam_path}")
-    print("═══════════════════════════════")
-
-    return {
-        'image': image_path,
-        'result': label,
-        'confidence': confidence,
-        'heatmap': gradcam_path
-    }
+    return result
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Deepfake detection demo')
+    parser = argparse.ArgumentParser(description='Run a TrustVision image scan from the command line.')
     parser.add_argument('--image', required=True, help='Path to the image file')
     args = parser.parse_args()
 

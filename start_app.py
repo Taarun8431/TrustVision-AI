@@ -1,7 +1,6 @@
 import subprocess
 import sys
 import os
-import signal
 import time
 
 def terminate_processes(processes):
@@ -38,11 +37,9 @@ if __name__ == "__main__":
 
         # 2. Start the Frontend Application (Vite/React)
         print("\n[>>] Starting React Frontend on port 5173...")
-        # We use shell=True on Windows for npm commands to resolve correctly
         frontend_process = subprocess.Popen(
-            ["npm", "run", "dev"],
-            cwd=frontend_dir,
-            shell=True
+            ["npm.cmd", "run", "dev"],
+            cwd=frontend_dir
         )
         processes.append(frontend_process)
 
