@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "app.py": {
+      "excludeFiles": "{Frontend/**,test_images/**,manifests/**,.gradio/**,reports/**,output/**,debug_inference.py,demo.py,gradio_app.py,start_app.py,sample_image.jpg,requirements-ml.txt,requirements-gradio.txt,ml/train.py,ml/test.py,ml/dataset.py,ml/model.py,ml/diagnostic.py,ml/requirements_ml.txt,**/__pycache__/**,**/*.pyc}"
+    }
+  }
+}

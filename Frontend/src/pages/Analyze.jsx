@@ -15,7 +15,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useSearchParams } from 'react-router-dom';
 
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const API_URL = `${API_BASE_URL}/scan`;
 const LIVE_SCAN_INTERVAL_MS = 2500;
 

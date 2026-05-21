@@ -1,13 +1,13 @@
-# TrustVision AI — Python dependencies
+# TrustVision AI production dependencies.
 #
-# Primary model: prithivMLmods/deepfake-detector-model-v1 (HuggingFace SigLip)
-# Backend:       FastAPI + Uvicorn
-# Database:      SQLite via SQLAlchemy
-# Reports:       ReportLab PDF generation
+# This file is intentionally Vercel-safe: it excludes the local PyTorch,
+# Transformers, OpenCV, MediaPipe, and Gradio stacks. Vercel uses the
+# Hugging Face Inference API backend by default. For full local ML inference,
+# install requirements-ml.txt instead.
 
 # --- Web framework ---
 fastapi==0.115.5
-uvicorn[standard]==0.32.1
+uvicorn==0.32.1
 python-multipart==0.0.12
 
 # --- Database ---
@@ -16,23 +16,8 @@ sqlalchemy==2.0.36
 # --- PDF reports ---
 reportlab==4.2.5
 
-# --- Image processing ---
-numpy==1.26.4
+# --- Lightweight image metadata handling ---
 pillow==10.4.0
-opencv-python==4.10.0.84
-scipy==1.13.1
-
-# --- ML / HuggingFace SigLip model ---
-torch==2.4.1
-transformers==4.46.3
-safetensors==0.4.5
-hf_xet==1.1.0
-
-# --- Optional: MediaPipe face landmarks ---
-mediapipe==0.10.18
-
-# --- Optional: Gradio demo (gradio_app.py) ---
-gradio==4.44.1
 
 # --- Optional: Gemini Vision secondary verifier ---
 google-genai==1.12.1

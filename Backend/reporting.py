@@ -1,6 +1,7 @@
 import os
 from io import BytesIO
 from pathlib import Path
+from tempfile import gettempdir
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -11,7 +12,8 @@ from reportlab.pdfgen import canvas
 from ml.runtime_config import MODEL_VERSION
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-REPORTS_DIR = ROOT_DIR / "reports"
+DEFAULT_REPORTS_DIR = Path(gettempdir()) / "trustvision-reports" if os.getenv("VERCEL") else ROOT_DIR / "reports"
+REPORTS_DIR = Path(os.getenv("REPORTS_DIR", DEFAULT_REPORTS_DIR))
 
 
 def infer_media_type(filename: str) -> str:
@@ -53,8 +55,6 @@ def _draw_wrapped_text(pdf: canvas.Canvas, text: str, x: float, y: float, width:
 
 
 def generate_pdf_report(scan_record):
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
     pdf_buffer = BytesIO()
     pdf = canvas.Canvas(pdf_buffer, pagesize=A4)
     width, height = A4
@@ -154,8 +154,10 @@ def generate_pdf_report(scan_record):
     pdf_bytes = pdf_buffer.getvalue()
 
     report_filename = f"trustvision_report_{scan_record.id}.pdf"
-    report_path = REPORTS_DIR / report_filename
-    with report_path.open("wb") as handle:
-        handle.write(pdf_bytes)
+    if os.getenv("TRUSTVISION_SAVE_REPORTS", "0") == "1":
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = REPORTS_DIR / report_filename
+        with report_path.open("wb") as handle:
+            handle.write(pdf_bytes)
 
     return pdf_bytes, report_filename, explanation_summary

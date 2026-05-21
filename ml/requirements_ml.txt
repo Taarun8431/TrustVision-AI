@@ -1,12 +1,1 @@
-# ML inference dependencies for TrustVision AI
-# Primary model: prithivMLmods/deepfake-detector-model-v1 (HuggingFace SigLip)
-
-torch
-transformers
-safetensors
-hf_xet
-opencv-python
-pillow
-numpy
-scipy
-mediapipe
+-r ../requirements-ml.txt

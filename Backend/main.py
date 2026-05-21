@@ -8,7 +8,7 @@ Endpoints:
   POST /scan          — deepfake detection on an uploaded image
   GET  /reports/{id}  — download PDF report for a past scan
 
-The HF SigLip model is loaded once at startup (global `detector`).
+The detector backend is initialized once at startup (global `detector`).
 """
 
 import os
@@ -32,7 +32,7 @@ from Backend.reporting import generate_pdf_report
 # Create DB tables on startup if they don't exist
 models.Base.metadata.create_all(bind=engine)
 
-# Load the HF model and optional Gemini verifier once at startup
+# Initialize the detector backend and optional Gemini verifier once at startup
 detector = DeepfakeDetector()
 gemini = get_verifier()
 
@@ -42,10 +42,17 @@ app = FastAPI(
     version="2.0.0",
 )
 
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",")
+    if origin.strip()
+]
+allow_credentials = "*" not in allowed_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -80,6 +87,7 @@ def health_check():
         "model_loaded": meta["model_loaded"],
         "model_name": meta["model_name"],
         "model_version": meta["model_version"],
+        "inference_backend": meta.get("inference_backend"),
         "device": meta["device"],
         "gemini_enabled": gemini.enabled,
         "load_error": meta.get("load_error"),

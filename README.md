@@ -4,7 +4,7 @@ TrustVision AI is a face-image authenticity analysis project built with:
 
 - `FastAPI` for the backend API
 - `React + Vite + Tailwind CSS` for the frontend
-- `PyTorch` for image inference
+- Hugging Face Inference API on Vercel, or local `PyTorch` for full local inference
 - `SQLite` for scan history
 - `ReportLab` for PDF report export
 
@@ -32,6 +32,9 @@ TrustVision-AI/
   ml/                   Core inference logic and ML model weights
   app.py                FastAPI deployment entrypoint
   gradio_app.py         Gradio UI demo
+  requirements.txt      Production/Vercel Python dependencies
+  requirements-ml.txt   Full local ML inference dependencies
+  requirements-gradio.txt Standalone Gradio demo dependencies
   demo.py               Command-line interface (CLI) image scan demo
   start_app.py          Starts backend and frontend together
 ```
@@ -43,9 +46,14 @@ TrustVision-AI/
 - **Node.js & npm**
 
 ### 1. Install Dependencies
-Install the Python backend and machine learning dependencies:
+Install the production Python backend dependencies:
 ```bash
 pip install -r requirements.txt
+```
+
+For full local PyTorch/OpenCV inference, install the ML dependency set instead:
+```bash
+pip install -r requirements-ml.txt
 ```
 
 Install the React frontend dependencies:
@@ -71,17 +79,29 @@ Alternatively, you can run them manually in separate terminal windows:
 - **Frontend:** `cd Frontend && npm run dev`
 
 ### Optional Gemini Verification
-The app works with the local PyTorch checkpoint by default. To enable the optional Gemini secondary verifier, set one of these environment variables before starting the backend:
+To enable the optional Gemini secondary verifier, set one of these environment variables before starting the backend:
 ```bash
 GEMINI_API_KEY=your_key_here
 ```
 For key rotation, set `GEMINI_API_KEYS` to a comma-separated list. Do not hardcode API keys in source files.
+
+### Vercel Deployment
+The root `app.py` exports the FastAPI `app` for Vercel. Vercel uses `requirements.txt`, Python 3.12, `/tmp/trustvision.db` for SQLite, and the remote Hugging Face inference backend by default.
+
+Recommended Vercel environment variables:
+```bash
+HF_TOKEN=your_huggingface_token
+GEMINI_API_KEY=your_optional_gemini_key
+```
+
+If you deploy the frontend separately, set `VITE_API_BASE_URL` to the deployed backend URL before building the frontend. If the frontend and backend share the same origin, leave it empty.
 
 ## Optional Demos
 
 ### Gradio Web UI
 A lightweight Gradio web interface is available for quickly testing the model outside the main application:
 ```bash
+pip install -r requirements-gradio.txt
 python gradio_app.py
 ```
 

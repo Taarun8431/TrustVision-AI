@@ -1,64 +1,164 @@
 """
-Deepfake inference using the Hugging Face SigLip model:
-  prithivMLmods/deepfake-detector-model-v1
+Deployment-safe deepfake inference wrapper.
 
-Label space (from model config):
-  id2label = {0: "fake", 1: "real"}
-
-The model is loaded once at startup and reused for every request.
+Local development can use the Hugging Face SigLip model through PyTorch.
+Vercel deployments default to the Hugging Face Inference API so the serverless
+bundle does not need to include local torch/transformers/OpenCV wheels.
 """
 
-import cv2
 import io
-import numpy as np
-from PIL import Image, ExifTags
-from scipy.fftpack import dct
-from transformers import AutoImageProcessor, SiglipForImageClassification
-import torch
+import json
+import os
+import urllib.error
+import urllib.request
 
 try:
-    import mediapipe as mp
-    MEDIAPIPE_AVAILABLE = True
+    from PIL import ExifTags, Image
 except ImportError:
-    MEDIAPIPE_AVAILABLE = False
+    ExifTags = None
+    Image = None
 
-from .runtime_config import MODEL_NAME, MODEL_VERSION, LABEL_MAPPING_NOTE
+_BACKEND_ENV = os.getenv("TRUSTVISION_INFERENCE_BACKEND", "auto").strip().lower()
+_REMOTE_ONLY = _BACKEND_ENV == "remote" or (_BACKEND_ENV in {"", "auto"} and os.getenv("VERCEL"))
+
+if _REMOTE_ONLY:
+    cv2 = None
+    np = None
+    dct = None
+    torch = None
+    AutoImageProcessor = None
+    SiglipForImageClassification = None
+    mp = None
+else:
+    try:
+        import cv2
+    except ImportError:
+        cv2 = None
+
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+
+    try:
+        from scipy.fftpack import dct
+    except ImportError:
+        dct = None
+
+    try:
+        import torch
+        from transformers import AutoImageProcessor, SiglipForImageClassification
+    except ImportError:
+        torch = None
+        AutoImageProcessor = None
+        SiglipForImageClassification = None
+
+    try:
+        import mediapipe as mp
+    except ImportError:
+        mp = None
+
+from .runtime_config import LABEL_MAPPING_NOTE, MODEL_NAME, MODEL_VERSION
+
+
+MEDIAPIPE_AVAILABLE = mp is not None
+LOCAL_ML_AVAILABLE = all(
+    dependency is not None
+    for dependency in (
+        cv2,
+        np,
+        Image,
+        dct,
+        torch,
+        AutoImageProcessor,
+        SiglipForImageClassification,
+    )
+)
 
 
 class DeepfakeDetector:
     """
-    Wraps the Hugging Face SigLip deepfake detection model.
+    Wraps the TrustVision detection backend.
 
-    Inference pipeline per image:
-      1. Detect and crop the largest face (OpenCV Haar Cascade).
-      2. Run the HF model on both the face crop (60%) and full image (40%).
-      3. Blend probabilities and apply forensic signal adjustments.
-      4. Return a structured result dict.
+    Backend selection:
+      - TRUSTVISION_INFERENCE_BACKEND=local uses local torch/transformers.
+      - TRUSTVISION_INFERENCE_BACKEND=remote uses Hugging Face Inference API.
+      - auto (default) uses remote on Vercel and local when local ML deps exist.
     """
 
     def __init__(self, model_name: str = None):
         self.model_name = model_name or MODEL_NAME
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.class_map = {"REAL": 1, "FAKE": 0}
         self.model_loaded = False
         self.load_error = None
+        self.processor = None
+        self.model = None
+        self.face_cascade = None
+        self.mp_face_mesh = None
+        self.hf_token = (
+            os.getenv("HF_TOKEN")
+            or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+            or os.getenv("HUGGING_FACE_HUB_TOKEN")
+            or ""
+        )
+        self.remote_endpoint = os.getenv(
+            "HF_INFERENCE_URL",
+            f"https://api-inference.huggingface.co/models/{self.model_name}",
+        )
 
-        # Label indices: class 0 = fake, class 1 = real (per HF model config)
-        self.class_map = {"REAL": 1, "FAKE": 0}
+        requested_backend = os.getenv("TRUSTVISION_INFERENCE_BACKEND", "auto").strip().lower()
+        if requested_backend not in {"auto", "local", "remote"}:
+            requested_backend = "auto"
 
-        # Load the Hugging Face SigLip model
+        if requested_backend == "remote" or (requested_backend == "auto" and os.getenv("VERCEL")):
+            self.backend = "remote"
+            self.model_loaded = True
+            print(f"[DeepfakeDetector] Using remote Hugging Face Inference API: {self.remote_endpoint}")
+        elif requested_backend == "local" or LOCAL_ML_AVAILABLE:
+            self.backend = "local"
+            self._init_local_model()
+        else:
+            self.backend = "remote"
+            self.model_loaded = True
+            self.load_error = "Local ML dependencies are not installed; using remote inference."
+            print(f"[DeepfakeDetector] {self.load_error}")
+
+    def _init_local_model(self):
+        if not LOCAL_ML_AVAILABLE:
+            self.load_error = (
+                "Local inference dependencies are missing. Install requirements-ml.txt "
+                "or set TRUSTVISION_INFERENCE_BACKEND=remote."
+            )
+            print(f"[DeepfakeDetector] {self.load_error}")
+            return
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         try:
             self.processor = AutoImageProcessor.from_pretrained(self.model_name)
             self.model = SiglipForImageClassification.from_pretrained(self.model_name).to(self.device)
             self.model.eval()
 
-            # Confirm label mapping from model config (defensive check)
             id2label = getattr(self.model.config, "id2label", None)
             if id2label:
                 normalized = {int(k): str(v).strip().upper() for k, v in id2label.items()}
-                real_idx = next((i for i, lbl in normalized.items() if lbl == "REAL"), None)
-                fake_idx = next((i for i, lbl in normalized.items() if lbl == "FAKE"), None)
+                real_idx = next((i for i, label in normalized.items() if label == "REAL"), None)
+                fake_idx = next((i for i, label in normalized.items() if label == "FAKE"), None)
                 if real_idx is not None and fake_idx is not None:
                     self.class_map = {"REAL": real_idx, "FAKE": fake_idx}
+
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            self.face_cascade = cv2.CascadeClassifier(cascade_path)
+
+            self.mp_face_mesh = (
+                mp.solutions.face_mesh.FaceMesh(
+                    static_image_mode=True,
+                    max_num_faces=1,
+                    refine_landmarks=True,
+                )
+                if MEDIAPIPE_AVAILABLE
+                else None
+            )
 
             self.model_loaded = True
             print(
@@ -69,135 +169,191 @@ class DeepfakeDetector:
             self.load_error = str(exc)
             print(f"[DeepfakeDetector] ERROR: Failed to load HF model '{self.model_name}': {exc}")
 
-        # OpenCV face detector (Haar Cascade)
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        self.face_cascade = cv2.CascadeClassifier(cascade_path)
-
-        # MediaPipe face mesh (optional, currently unused in scoring)
-        self.mp_face_mesh = (
-            mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=True, max_num_faces=1, refine_landmarks=True
-            )
-            if MEDIAPIPE_AVAILABLE
-            else None
-        )
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def metadata(self) -> dict:
-        """Returns model metadata for the /health and /model-info endpoints."""
         return {
             "model_loaded": self.model_loaded,
             "model_name": self.model_name,
             "model_version": MODEL_VERSION,
-            "device": str(self.device),
+            "inference_backend": self.backend,
+            "device": str(getattr(self, "device", "remote")),
             "class_map": self.class_map,
             "label_mapping_note": LABEL_MAPPING_NOTE,
+            "local_ml_available": LOCAL_ML_AVAILABLE,
             "mediapipe_available": MEDIAPIPE_AVAILABLE,
+            "remote_endpoint": self.remote_endpoint if self.backend == "remote" else None,
+            "remote_auth_configured": bool(self.hf_token),
             "load_error": self.load_error,
         }
 
     def predict_image(self, image_bytes: bytes) -> dict:
-        """
-        Run deepfake detection on raw image bytes.
-
-        Returns a dict with keys:
-          success, prediction, authenticity_score, confidence, risk_level,
-          real_probability, fake_probability, neural_real_probability,
-          neural_fake_probability, model_version, class_map, heatmap_base64,
-          heatmap_error, face_box, forensic_analysis
-        """
         try:
             if not self.model_loaded:
                 raise RuntimeError(
-                    f"Model not loaded ('{self.model_name}'). "
-                    f"Error: {self.load_error}"
+                    f"Model not loaded ('{self.model_name}'). Error: {self.load_error}"
                 )
 
-            # Decode bytes → OpenCV BGR
-            np_img = np.frombuffer(image_bytes, np.uint8)
-            img_bgr = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-            if img_bgr is None:
-                raise ValueError("Could not decode image. Ensure the file is a valid image.")
-
-            # Face detection and crop
-            face_img, face_box = self._detect_face(img_bgr)
-            if face_img is None:
-                # No face found — use the full image
-                face_img = img_bgr
-                face_box = (0, 0, img_bgr.shape[1], img_bgr.shape[0])
-
-            # Convert BGR → RGB PIL images
-            face_pil = Image.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
-            full_pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-
-            # Run model on face crop and full image, then blend (60/40)
-            face_probs = self._run_model(face_pil)
-            full_probs = self._run_model(full_pil)
-            blended = (0.6 * face_probs) + (0.4 * full_probs)
-
-            real_idx = self.class_map["REAL"]
-            fake_idx = self.class_map["FAKE"]
-            neural_real = float(blended[real_idx].item())
-            neural_fake = float(blended[fake_idx].item())
-
-            # Forensic signal analysis
-            metadata_signals = self._read_metadata_signals(image_bytes)
-            forensic_signals = self._compute_forensic_signals(face_img)
-            fusion = self._fuse_probabilities(neural_real, neural_fake, metadata_signals, forensic_signals)
-
-            real_prob = fusion["real_probability"]
-            fake_prob = fusion["fake_probability"]
-
-            prediction = "REAL" if real_prob >= fake_prob else "FAKE"
-            authenticity_score = real_prob * 100
-            confidence = max(real_prob, fake_prob) * 100
-            risk_level = self._risk_level(prediction, confidence, fake_prob, metadata_signals, forensic_signals)
-
-            return {
-                "success": True,
-                "prediction": prediction,
-                "authenticity_score": round(authenticity_score, 3),
-                "confidence": round(confidence, 2),
-                "risk_level": risk_level,
-                "real_probability": round(real_prob * 100, 3),
-                "fake_probability": round(fake_prob * 100, 3),
-                "neural_real_probability": round(neural_real * 100, 3),
-                "neural_fake_probability": round(neural_fake * 100, 3),
-                "model_version": MODEL_VERSION,
-                "class_map": self.class_map,
-                "heatmap_base64": None,
-                "heatmap_error": "Heatmap generation is not supported for the SigLip model.",
-                "face_box": {
-                    "x1": face_box[0],
-                    "y1": face_box[1],
-                    "x2": face_box[2],
-                    "y2": face_box[3],
-                },
-                "forensic_analysis": {
-                    "metadata": metadata_signals,
-                    "signals": forensic_signals,
-                    "forensic_adjustment": fusion["forensic_adjustment"],
-                    "fusion_reasons": fusion["fusion_reasons"],
-                },
-            }
-
+            if self.backend == "remote":
+                return self._predict_image_remote(image_bytes)
+            return self._predict_image_local(image_bytes)
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
+    def _predict_image_remote(self, image_bytes: bytes) -> dict:
+        remote_scores = self._run_remote_model(image_bytes)
+        metadata_signals = self._read_metadata_signals(image_bytes)
+        forensic_signals = self._default_forensic_signals("Remote Vercel inference skips local OpenCV analysis.")
+
+        fusion = self._fuse_probabilities(
+            remote_scores["REAL"],
+            remote_scores["FAKE"],
+            metadata_signals,
+            forensic_signals,
+        )
+
+        real_prob = fusion["real_probability"]
+        fake_prob = fusion["fake_probability"]
+        prediction = "REAL" if real_prob >= fake_prob else "FAKE"
+        confidence = max(real_prob, fake_prob) * 100
+        risk_level = self._risk_level(prediction, confidence, fake_prob, metadata_signals, forensic_signals)
+
+        return {
+            "success": True,
+            "prediction": prediction,
+            "authenticity_score": round(real_prob * 100, 3),
+            "confidence": round(confidence, 2),
+            "risk_level": risk_level,
+            "real_probability": round(real_prob * 100, 3),
+            "fake_probability": round(fake_prob * 100, 3),
+            "neural_real_probability": round(remote_scores["REAL"] * 100, 3),
+            "neural_fake_probability": round(remote_scores["FAKE"] * 100, 3),
+            "model_version": f"{MODEL_VERSION} via Hugging Face Inference API",
+            "inference_backend": "remote",
+            "class_map": self.class_map,
+            "heatmap_base64": None,
+            "heatmap_error": "Heatmap generation is not supported in remote Vercel inference mode.",
+            "face_box": self._full_image_box(image_bytes),
+            "forensic_analysis": {
+                "metadata": metadata_signals,
+                "signals": forensic_signals,
+                "forensic_adjustment": fusion["forensic_adjustment"],
+                "fusion_reasons": fusion["fusion_reasons"],
+            },
+        }
+
+    def _predict_image_local(self, image_bytes: bytes) -> dict:
+        np_img = np.frombuffer(image_bytes, np.uint8)
+        img_bgr = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            raise ValueError("Could not decode image. Ensure the file is a valid image.")
+
+        face_img, face_box = self._detect_face(img_bgr)
+        if face_img is None:
+            face_img = img_bgr
+            face_box = (0, 0, img_bgr.shape[1], img_bgr.shape[0])
+
+        face_pil = Image.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
+        full_pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+
+        face_probs = self._run_model(face_pil)
+        full_probs = self._run_model(full_pil)
+        blended = (0.6 * face_probs) + (0.4 * full_probs)
+
+        real_idx = self.class_map["REAL"]
+        fake_idx = self.class_map["FAKE"]
+        neural_real = float(blended[real_idx].item())
+        neural_fake = float(blended[fake_idx].item())
+
+        metadata_signals = self._read_metadata_signals(image_bytes)
+        forensic_signals = self._compute_forensic_signals(face_img)
+        fusion = self._fuse_probabilities(neural_real, neural_fake, metadata_signals, forensic_signals)
+
+        real_prob = fusion["real_probability"]
+        fake_prob = fusion["fake_probability"]
+        prediction = "REAL" if real_prob >= fake_prob else "FAKE"
+        confidence = max(real_prob, fake_prob) * 100
+        risk_level = self._risk_level(prediction, confidence, fake_prob, metadata_signals, forensic_signals)
+
+        return {
+            "success": True,
+            "prediction": prediction,
+            "authenticity_score": round(real_prob * 100, 3),
+            "confidence": round(confidence, 2),
+            "risk_level": risk_level,
+            "real_probability": round(real_prob * 100, 3),
+            "fake_probability": round(fake_prob * 100, 3),
+            "neural_real_probability": round(neural_real * 100, 3),
+            "neural_fake_probability": round(neural_fake * 100, 3),
+            "model_version": MODEL_VERSION,
+            "inference_backend": "local",
+            "class_map": self.class_map,
+            "heatmap_base64": None,
+            "heatmap_error": "Heatmap generation is not supported for the SigLip model.",
+            "face_box": {
+                "x1": face_box[0],
+                "y1": face_box[1],
+                "x2": face_box[2],
+                "y2": face_box[3],
+            },
+            "forensic_analysis": {
+                "metadata": metadata_signals,
+                "signals": forensic_signals,
+                "forensic_adjustment": fusion["forensic_adjustment"],
+                "fusion_reasons": fusion["fusion_reasons"],
+            },
+        }
+
+    def _run_remote_model(self, image_bytes: bytes) -> dict:
+        headers = {"Content-Type": "application/octet-stream"}
+        if self.hf_token:
+            headers["Authorization"] = f"Bearer {self.hf_token}"
+
+        timeout = int(os.getenv("HF_INFERENCE_TIMEOUT", "45"))
+        request = urllib.request.Request(
+            self.remote_endpoint,
+            data=image_bytes,
+            headers=headers,
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Hugging Face inference failed ({exc.code}): {body}") from exc
+
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RuntimeError(f"Hugging Face inference error: {payload['error']}")
+        if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], list):
+            payload = payload[0]
+        if not isinstance(payload, list):
+            raise RuntimeError(f"Unexpected Hugging Face response: {payload}")
+
+        scores = {"REAL": 0.0, "FAKE": 0.0}
+        for item in payload:
+            label = str(item.get("label", "")).strip().upper()
+            score = float(item.get("score", 0.0))
+            if label in {"REAL", "LABEL_1"}:
+                scores["REAL"] = score
+            elif label in {"FAKE", "LABEL_0"}:
+                scores["FAKE"] = score
+
+        total = scores["REAL"] + scores["FAKE"]
+        if total <= 0:
+            raise RuntimeError(f"Could not map Hugging Face labels from response: {payload}")
+
+        return {
+            "REAL": scores["REAL"] / total,
+            "FAKE": scores["FAKE"] / total,
+        }
+
     def predict_video(self, video_path: str, fps_sample_rate: int = 1) -> dict:
-        """
-        Sample frames from a video file and aggregate per-frame predictions.
+        if self.backend != "local":
+            return {
+                "success": False,
+                "error": "Video scanning requires local ML dependencies and is not enabled on Vercel.",
+            }
 
-        Args:
-            video_path: Path to the video file on disk.
-            fps_sample_rate: How many frames per second to sample.
-
-        Returns:
-            Aggregated result dict (same shape as predict_image, minus heatmap).
-        """
         try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
@@ -249,35 +405,23 @@ class DeepfakeDetector:
                 "total_frames_analyzed": len(scores),
                 "heatmap_base64_thumbnail": None,
             }
-
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _run_model(self, pil_img: Image.Image) -> torch.Tensor:
-        """Run the HF SigLip model on a PIL image and return softmax probabilities."""
+    def _run_model(self, pil_img):
         inputs = self.processor(images=pil_img.convert("RGB"), return_tensors="pt").to(self.device)
         with torch.no_grad():
             logits = self.model(**inputs).logits
             probs = torch.nn.functional.softmax(logits, dim=1)[0]
         return probs
 
-    def _detect_face(self, img_bgr: np.ndarray):
-        """
-        Detect the largest face in a BGR image using Haar Cascade.
-
-        Returns:
-            (face_crop_bgr, (x1, y1, x2, y2)) or (None, None) if no face found.
-        """
+    def _detect_face(self, img_bgr):
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5)
         if len(faces) == 0:
             return None, None
 
-        x, y, w, h = max(faces, key=lambda r: r[2] * r[3])
+        x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
         mx, my = int(w * 0.2), int(h * 0.2)
         x1 = max(0, x - mx)
         y1 = max(0, y - my)
@@ -286,9 +430,6 @@ class DeepfakeDetector:
         return img_bgr[y1:y2, x1:x2], (x1, y1, x2, y2)
 
     def _read_metadata_signals(self, image_bytes: bytes) -> dict:
-        """
-        Inspect image metadata for AI-generation markers and camera EXIF tags.
-        """
         signals = {
             "is_ai_metadata": False,
             "has_camera_exif": False,
@@ -297,26 +438,48 @@ class DeepfakeDetector:
             "editor_metadata_hits": [],
             "metadata_error": None,
         }
+        if Image is None or ExifTags is None:
+            signals["metadata_error"] = "Pillow is not installed."
+            return signals
+
         ai_terms = (
-            "midjourney", "stable diffusion", "stable-diffusion", "dall-e",
-            "dalle", "ai generated", "aigc", "comfyui", "automatic1111",
-            "novelai", "invokeai", "sdxl", "flux", "firefly",
-            "generative ai", "openai", "chatgpt",
+            "midjourney",
+            "stable diffusion",
+            "stable-diffusion",
+            "dall-e",
+            "dalle",
+            "ai generated",
+            "aigc",
+            "comfyui",
+            "automatic1111",
+            "novelai",
+            "invokeai",
+            "sdxl",
+            "flux",
+            "firefly",
+            "generative ai",
+            "openai",
+            "chatgpt",
         )
         editor_terms = ("photoshop", "lightroom", "gimp", "snapseed")
         camera_tag_names = {
-            "Make", "Model", "LensModel", "LensMake", "ExposureTime",
-            "FNumber", "ISOSpeedRatings", "PhotographicSensitivity",
-            "FocalLength", "DateTimeOriginal",
+            "Make",
+            "Model",
+            "LensModel",
+            "LensMake",
+            "ExposureTime",
+            "FNumber",
+            "ISOSpeedRatings",
+            "PhotographicSensitivity",
+            "FocalLength",
+            "DateTimeOriginal",
         }
 
         try:
             with Image.open(io.BytesIO(image_bytes)) as pil_raw:
-                info_text = " ".join(
-                    f"{k}={v}" for k, v in pil_raw.info.items()
-                ).lower()
-                signals["ai_metadata_hits"] = [t for t in ai_terms if t in info_text]
-                signals["editor_metadata_hits"] = [t for t in editor_terms if t in info_text]
+                info_text = " ".join(f"{key}={value}" for key, value in pil_raw.info.items()).lower()
+                signals["ai_metadata_hits"] = [term for term in ai_terms if term in info_text]
+                signals["editor_metadata_hits"] = [term for term in editor_terms if term in info_text]
                 signals["is_ai_metadata"] = bool(signals["ai_metadata_hits"])
 
                 exif = pil_raw.getexif()
@@ -331,10 +494,40 @@ class DeepfakeDetector:
 
         return signals
 
-    def _compute_forensic_signals(self, face_img: np.ndarray) -> dict:
-        """
-        Compute texture, frequency, edge, and ELA signals on the face crop.
-        """
+    def _full_image_box(self, image_bytes: bytes) -> dict:
+        if Image is None:
+            return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                width, height = img.size
+            return {"x1": 0, "y1": 0, "x2": width, "y2": height}
+        except Exception:
+            return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
+
+    def _default_forensic_signals(self, note: str) -> dict:
+        return {
+            "analysis_mode": note,
+            "laplacian_variance": None,
+            "dct_high_frequency_ratio": None,
+            "edge_fraction": None,
+            "ela_variance": None,
+            "strong_flags": {
+                "very_low_texture": False,
+                "very_low_edge_density": False,
+                "very_low_high_frequency_energy": False,
+                "high_ela_variance": False,
+            },
+            "weak_flags": {
+                "low_texture": False,
+                "low_edge_density": False,
+                "low_high_frequency_energy": False,
+                "medium_ela_variance": False,
+            },
+            "strong_signal_count": 0,
+            "weak_signal_count": 0,
+        }
+
+    def _compute_forensic_signals(self, face_img) -> dict:
         gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
         gray_f = gray.astype(np.float32)
 
@@ -368,11 +561,7 @@ class DeepfakeDetector:
             "weak_signal_count": int(sum(weak_flags.values())),
         }
 
-    def _dct_high_freq_ratio(self, gray_f: np.ndarray) -> float:
-        """
-        Compute the ratio of high-frequency DCT energy to total energy.
-        Generative models leave checkerboard artifacts in the high-frequency band.
-        """
+    def _dct_high_freq_ratio(self, gray_f) -> float:
         dct_y = dct(dct(gray_f.T, norm="ortho").T, norm="ortho")
         power = np.abs(dct_y) ** 2
         h, w = power.shape
@@ -380,11 +569,7 @@ class DeepfakeDetector:
         total = np.sum(power)
         return high / total if total > 0 else 0.0
 
-    def _ela_variance(self, face_img: np.ndarray) -> float:
-        """
-        Error Level Analysis: re-compress to JPEG and measure difference variance.
-        AI images often show higher ELA variance due to uniform compression response.
-        """
+    def _ela_variance(self, face_img) -> float:
         _, enc = cv2.imencode(".jpg", face_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         dec = cv2.imdecode(enc, cv2.IMREAD_COLOR)
         diff = cv2.absdiff(face_img.astype(np.float32), dec.astype(np.float32))
@@ -397,10 +582,7 @@ class DeepfakeDetector:
         metadata_signals: dict,
         forensic_signals: dict,
     ) -> dict:
-        """
-        Adjust neural probabilities upward for fake based on forensic evidence.
-        """
-        fake_prob = float(np.clip(neural_fake, 0.001, 0.999))
+        fake_prob = float(self._clip(neural_fake, 0.001, 0.999))
         adjustment = 0.0
         reasons = []
 
@@ -432,7 +614,7 @@ class DeepfakeDetector:
 
         if strong["high_ela_variance"]:
             adjustment += 0.08
-            reasons.append("high ELA variance (AI compression artifact)")
+            reasons.append("high ELA variance")
         elif weak["medium_ela_variance"]:
             adjustment += 0.02
 
@@ -441,8 +623,6 @@ class DeepfakeDetector:
             reasons.append("no camera EXIF with synthetic artifact signals")
 
         fused_fake = min(0.99, fake_prob + adjustment)
-
-        # Floor overrides for high-confidence forensic cases
         if metadata_signals["is_ai_metadata"]:
             fused_fake = max(fused_fake, 0.97)
         elif not metadata_signals["has_camera_exif"] and strong_count >= 3:
@@ -473,3 +653,7 @@ class DeepfakeDetector:
         if confidence < 65 or forensic_signals["strong_signal_count"] >= 2:
             return "MEDIUM"
         return "LOW"
+
+    @staticmethod
+    def _clip(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
