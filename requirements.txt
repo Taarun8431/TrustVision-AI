@@ -31,7 +31,7 @@ hf_xet==1.1.0
 # --- Optional: MediaPipe face landmarks ---
 mediapipe==0.10.18
 
-# --- Optional: Gradio demo (app.py) ---
+# --- Optional: Gradio demo (gradio_app.py) ---
 gradio==4.44.1
 
 # --- Optional: Gemini Vision secondary verifier ---

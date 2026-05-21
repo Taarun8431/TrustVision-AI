@@ -30,7 +30,8 @@ TrustVision-AI/
   Frontend/             React application
   database/             SQLAlchemy database setup and models
   ml/                   Core inference logic and ML model weights
-  app.py                Gradio UI demo
+  app.py                FastAPI deployment entrypoint
+  gradio_app.py         Gradio UI demo
   demo.py               Command-line interface (CLI) image scan demo
   start_app.py          Starts backend and frontend together
 ```
@@ -81,7 +82,7 @@ For key rotation, set `GEMINI_API_KEYS` to a comma-separated list. Do not hardco
 ### Gradio Web UI
 A lightweight Gradio web interface is available for quickly testing the model outside the main application:
 ```bash
-python app.py
+python gradio_app.py
 ```
 
 ### CLI Image Scan
